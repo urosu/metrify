@@ -1,6 +1,6 @@
 import { Link } from '@inertiajs/react';
 import { PropsWithChildren } from 'react';
-import { Toaster } from '@/components/ui/sonner';
+import { Toaster } from '@/Components/ui/sonner';
 
 export default function AuthLayout({ children }: PropsWithChildren) {
     return (

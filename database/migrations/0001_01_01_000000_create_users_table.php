@@ -20,6 +20,13 @@ return new class extends Migration
             $table->boolean('is_super_admin')->default(false);
             $table->rememberToken();
             $table->timestamp('last_login_at')->nullable();
+
+            // Persists per-view UI state (breakdown dimension, order-by, filters).
+            // Keyed by view name: {"dashboard": {"breakdown": "country", "order_by": "roas_desc"}, ...}
+            // JSONB is sufficient — no separate table needed unless cross-user queries arise.
+            // Written by: BreakdownView auto-save (Phase 1.4). See: PLANNING.md "users — view_preferences"
+            $table->jsonb('view_preferences')->nullable();
+
             $table->timestamps();
         });
 

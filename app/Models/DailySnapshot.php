@@ -26,20 +26,16 @@ class DailySnapshot extends Model
         'items_per_order',
         'new_customers',
         'returning_customers',
-        'revenue_by_country',
-        'top_products',
     ];
 
     protected function casts(): array
     {
         return [
-            'date' => 'date',
-            'revenue' => 'decimal:4',
-            'revenue_native' => 'decimal:4',
-            'aov' => 'decimal:4',
+            'date'            => 'date',
+            'revenue'         => 'decimal:4',
+            'revenue_native'  => 'decimal:4',
+            'aov'             => 'decimal:4',
             'items_per_order' => 'decimal:2',
-            'revenue_by_country' => 'array',
-            'top_products' => 'array',
         ];
     }
 

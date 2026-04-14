@@ -17,6 +17,8 @@ class GscQuery extends Model
         'workspace_id',
         'date',
         'query',
+        'device',
+        'country',
         'clicks',
         'impressions',
         'ctr',

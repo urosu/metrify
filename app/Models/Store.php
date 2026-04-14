@@ -26,13 +26,13 @@ class Store extends Model
         'platform_store_id',
         'status',
         'consecutive_sync_failures',
+        'website_url',
         'auth_key_encrypted',
         'auth_secret_encrypted',
         'access_token_encrypted',
         'refresh_token_encrypted',
         'token_expires_at',
         'webhook_secret_encrypted',
-        'platform_webhook_ids',
         'historical_import_status',
         'historical_import_from',
         'historical_import_checkpoint',
@@ -42,6 +42,9 @@ class Store extends Model
         'historical_import_completed_at',
         'historical_import_duration_seconds',
         'last_synced_at',
+        'target_roas',
+        'target_cpo',
+        'target_marketing_pct',
     ];
 
     protected $hidden = [
@@ -61,7 +64,9 @@ class Store extends Model
             'historical_import_started_at' => 'datetime',
             'historical_import_completed_at' => 'datetime',
             'last_synced_at' => 'datetime',
-            'platform_webhook_ids' => 'array',
+            'target_roas' => 'decimal:2',
+            'target_cpo' => 'decimal:2',
+            'target_marketing_pct' => 'decimal:2',
         ];
     }
 
@@ -73,11 +78,6 @@ class Store extends Model
     public function orders(): HasMany
     {
         return $this->hasMany(Order::class);
-    }
-
-    public function orderItems(): HasMany
-    {
-        return $this->hasMany(OrderItem::class);
     }
 
     public function products(): HasMany
@@ -103,5 +103,25 @@ class Store extends Model
     public function searchConsoleProperty(): \Illuminate\Database\Eloquent\Relations\HasOne
     {
         return $this->hasOne(SearchConsoleProperty::class);
+    }
+
+    public function storeUrls(): HasMany
+    {
+        return $this->hasMany(StoreUrl::class);
+    }
+
+    public function storeWebhooks(): HasMany
+    {
+        return $this->hasMany(StoreWebhook::class);
+    }
+
+    public function dailySnapshotProducts(): HasMany
+    {
+        return $this->hasMany(DailySnapshotProduct::class);
+    }
+
+    public function lighthouseSnapshots(): HasMany
+    {
+        return $this->hasMany(LighthouseSnapshot::class);
     }
 }

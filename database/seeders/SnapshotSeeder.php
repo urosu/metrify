@@ -11,7 +11,6 @@ use App\Models\OrderItem;
 use App\Models\Store;
 use App\Models\Workspace;
 use Illuminate\Database\Seeder;
-use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 
 class SnapshotSeeder extends Seeder
@@ -29,37 +28,30 @@ class SnapshotSeeder extends Seeder
 
     private function seedDailySnapshots(int $workspaceId, int $storeId): void
     {
-        // Group orders by date
         $orders = Order::where('workspace_id', $workspaceId)
             ->where('store_id', $storeId)
             ->whereIn('status', ['completed', 'processing'])
-            ->select('id', 'total_in_reporting_currency', 'total', 'customer_email_hash', 'customer_country', 'occurred_at')
+            ->select('id', 'total_in_reporting_currency', 'total', 'customer_email_hash', 'occurred_at')
             ->get();
 
         $byDate = $orders->groupBy(fn ($o) => $o->occurred_at->toDateString());
 
-        // Track first appearance per email hash for new/returning
+        // Track first appearance per email hash for new/returning customer counts.
         $seenHashes = [];
 
-        // Build top products from order items
-        $allItems = OrderItem::where('workspace_id', $workspaceId)
-            ->where('store_id', $storeId)
-            ->select('order_id', 'product_external_id', 'product_name', 'quantity', 'line_total')
-            ->get()
-            ->keyBy('order_id');
-
         foreach ($byDate as $date => $dayOrders) {
-            $orderIds     = $dayOrders->pluck('id')->toArray();
-            $revenue      = $dayOrders->sum('total_in_reporting_currency');
+            $orderIds      = $dayOrders->pluck('id')->toArray();
+            $revenue       = $dayOrders->sum('total_in_reporting_currency');
             $revenueNative = $dayOrders->sum('total');
-            $count        = $dayOrders->count();
+            $count         = $dayOrders->count();
 
-            // New vs returning
             $newCustomers       = 0;
             $returningCustomers = 0;
             foreach ($dayOrders as $order) {
-                if ($order->customer_email_hash === null) continue;
-                if (!isset($seenHashes[$order->customer_email_hash])) {
+                if ($order->customer_email_hash === null) {
+                    continue;
+                }
+                if (! isset($seenHashes[$order->customer_email_hash])) {
                     $seenHashes[$order->customer_email_hash] = true;
                     $newCustomers++;
                 } else {
@@ -67,53 +59,71 @@ class SnapshotSeeder extends Seeder
                 }
             }
 
-            // Revenue by country
-            $byCountry = $dayOrders->groupBy('customer_country')
-                ->map(fn ($g) => round($g->sum('total_in_reporting_currency'), 2))
-                ->toArray();
-
-            // Top products from items on this day's orders
-            $dayItems = OrderItem::where('workspace_id', $workspaceId)
-                ->whereIn('order_id', $orderIds)
-                ->select('product_external_id', 'product_name', 'quantity', 'line_total')
-                ->get()
-                ->groupBy('product_external_id');
-
-            $topProducts = $dayItems->map(function ($items, $extId) {
-                return [
-                    'external_id' => $extId,
-                    'name'        => $items->first()->product_name,
-                    'units'       => $items->sum('quantity'),
-                    'revenue'     => round($items->sum('line_total'), 2),
-                ];
-            })->sortByDesc('revenue')->take(10)->values()->toArray();
-
-            $totalItems = OrderItem::where('workspace_id', $workspaceId)
-                ->whereIn('order_id', $orderIds)
-                ->sum('quantity');
+            // All OrderItem queries go through order_id — workspace_id/store_id are not
+            // columns on order_items (derivable via order_id). See: OrderItem model.
+            $totalItems = OrderItem::whereIn('order_id', $orderIds)->sum('quantity');
 
             DailySnapshot::updateOrCreate(
                 ['store_id' => $storeId, 'date' => $date],
                 [
-                    'workspace_id'       => $workspaceId,
-                    'orders_count'       => $count,
-                    'revenue'            => round($revenue, 4),
-                    'revenue_native'     => round($revenueNative, 4),
-                    'aov'                => $count > 0 ? round($revenue / $count, 4) : null,
-                    'items_sold'         => (int) $totalItems,
-                    'items_per_order'    => $count > 0 ? round($totalItems / $count, 2) : null,
-                    'new_customers'      => $newCustomers,
+                    'workspace_id'        => $workspaceId,
+                    'orders_count'        => $count,
+                    'revenue'             => round($revenue, 4),
+                    'revenue_native'      => round($revenueNative, 4),
+                    'aov'                 => $count > 0 ? round($revenue / $count, 4) : null,
+                    'items_sold'          => (int) $totalItems,
+                    'items_per_order'     => $count > 0 ? round($totalItems / $count, 2) : null,
+                    'new_customers'       => $newCustomers,
                     'returning_customers' => $returningCustomers,
-                    'revenue_by_country' => $byCountry,
-                    'top_products'       => $topProducts,
                 ]
             );
+
+            // Populate daily_snapshot_products — mirrors ComputeDailySnapshotJob logic.
+            // Related: app/Jobs/ComputeDailySnapshotJob.php (production path for this data)
+            $productRows = DB::table('order_items as oi')
+                ->join('orders as o', 'o.id', '=', 'oi.order_id')
+                ->selectRaw("
+                    oi.product_external_id,
+                    MAX(oi.product_name) AS product_name,
+                    SUM(oi.quantity)::int AS units,
+                    SUM(oi.line_total * (o.total_in_reporting_currency / NULLIF(o.total, 0))) AS revenue
+                ")
+                ->where('o.store_id', $storeId)
+                ->whereRaw("o.occurred_at::date = ?", [$date])
+                ->whereIn('o.status', ['completed', 'processing'])
+                ->whereNotNull('o.total_in_reporting_currency')
+                ->groupBy('oi.product_external_id')
+                ->orderByDesc('revenue')
+                ->limit(50)
+                ->get();
+
+            if ($productRows->isNotEmpty()) {
+                $now = now()->toDateTimeString();
+                $upsertRows = $productRows->values()->map(function ($row, int $idx) use ($workspaceId, $storeId, $date, $now): array {
+                    return [
+                        'workspace_id'        => $workspaceId,
+                        'store_id'            => $storeId,
+                        'snapshot_date'       => $date,
+                        'product_external_id' => $row->product_external_id,
+                        'product_name'        => mb_substr((string) $row->product_name, 0, 500),
+                        'revenue'             => round((float) $row->revenue, 4),
+                        'units'               => (int) $row->units,
+                        'rank'                => $idx + 1,
+                        'created_at'          => $now,
+                    ];
+                })->all();
+
+                DB::table('daily_snapshot_products')->upsert(
+                    $upsertRows,
+                    ['store_id', 'snapshot_date', 'product_external_id'],
+                    ['product_name', 'revenue', 'units', 'rank'],
+                );
+            }
         }
     }
 
     private function seedHourlySnapshots(int $workspaceId, int $storeId): void
     {
-        // Last 14 days of hourly data
         $orders = Order::where('workspace_id', $workspaceId)
             ->where('store_id', $storeId)
             ->whereIn('status', ['completed', 'processing'])

@@ -28,7 +28,15 @@ class WorkspaceSeeder extends Seeder
             'reporting_currency' => 'EUR',
             'reporting_timezone' => 'Europe/Berlin',
             'trial_ends_at'      => null,
-            'billing_plan'       => 'percentage',
+            'billing_plan'       => 'growth',
+            // Integration flags reflect what StoreSeeder/AdSeeder/SearchConsoleSeeder connect below
+            'has_store'          => true,
+            'has_ads'            => true,
+            'has_gsc'            => true,
+            'has_psi'            => false,
+            // Country used for holiday seeding and billing address defaults
+            'country'            => 'DE',
+            'timezone'           => 'Europe/Berlin',
         ]);
 
         WorkspaceUser::create(['workspace_id' => $demo->id, 'user_id' => $superAdmin->id, 'role' => 'owner']);

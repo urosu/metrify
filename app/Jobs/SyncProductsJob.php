@@ -4,22 +4,18 @@ declare(strict_types=1);
 
 namespace App\Jobs;
 
-use App\Exceptions\WooCommerceConnectionException;
 use App\Exceptions\WooCommerceRateLimitException;
 use App\Models\Alert;
 use App\Models\Store;
 use App\Models\SyncLog;
-use App\Scopes\WorkspaceScope;
-use App\Services\Integrations\WooCommerce\WooCommerceClient;
+use App\Models\Workspace;
+use App\Services\Integrations\WooCommerce\WooCommerceConnector;
 use App\Services\WorkspaceContext;
-use Carbon\Carbon;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
-use Illuminate\Support\Facades\Crypt;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -30,12 +26,13 @@ use Illuminate\Support\Facades\Log;
  * Tries:   3
  * Backoff: default [60, 300, 900] s
  *
- * Fetches products modified after the store's last_synced_at timestamp and
- * upserts them into the products table. On first sync (no last_synced_at),
- * fetches all products.
+ * Always fetches all products (full sync — no cursor). Products are a small
+ * dataset for SMBs; full re-upsert nightly is cheaper than cursor management.
  *
  * Scheduled daily at 02:00 UTC. Dispatched per active WooCommerce store via
  * a closure in routes/console.php.
+ *
+ * Related: app/Services/Integrations/WooCommerce/WooCommerceConnector.php
  */
 class SyncProductsJob implements ShouldQueue
 {
@@ -55,6 +52,12 @@ class SyncProductsJob implements ShouldQueue
     {
         app(WorkspaceContext::class)->set($this->workspaceId);
 
+        // Discard jobs queued before trial expiry.
+        if ($this->isWorkspaceFrozen()) {
+            Log::info('SyncProductsJob: skipped — workspace trial expired', ['workspace_id' => $this->workspaceId]);
+            return;
+        }
+
         $store = Store::find($this->storeId);
 
         if ($store === null || $store->status !== 'active') {
@@ -69,10 +72,13 @@ class SyncProductsJob implements ShouldQueue
             'status'            => 'running',
             'records_processed' => 0,
             'started_at'        => now(),
+            'queue'             => 'low',
+            'attempt'           => $this->attempts(),
         ]);
 
         try {
-            $count = $this->fetchAndUpsertProducts($store);
+            $connector = new WooCommerceConnector($store);
+            $count     = $connector->syncProducts();
 
             $syncLog->update([
                 'status'            => 'completed',
@@ -81,7 +87,8 @@ class SyncProductsJob implements ShouldQueue
                 'duration_seconds'  => (int) max(0, (int) now()->diffInSeconds($syncLog->started_at)),
             ]);
 
-            $store->update(['last_synced_at' => now()]);
+            // Why: last_synced_at is owned by SyncStoreOrdersJob (order sync cursor).
+            // SyncProductsJob always does a full sync and does not move that cursor.
             $this->onSuccess($store);
 
             Log::info('SyncProductsJob: completed', [
@@ -129,11 +136,11 @@ class SyncProductsJob implements ShouldQueue
             $store->update($updates);
 
             Alert::create([
-                'workspace_id'   => $this->workspaceId,
-                'store_id'       => $this->storeId,
-                'type'           => 'sync_failure',
-                'severity'       => $failures >= 3 ? 'critical' : 'warning',
-                'data'           => [
+                'workspace_id' => $this->workspaceId,
+                'store_id'     => $this->storeId,
+                'type'         => 'sync_failure',
+                'severity'     => $failures >= 3 ? 'critical' : 'warning',
+                'data'         => [
                     'job'      => 'SyncProductsJob',
                     'failures' => $failures,
                     'error'    => mb_substr($exception->getMessage(), 0, 255),
@@ -151,107 +158,6 @@ class SyncProductsJob implements ShouldQueue
     // Private helpers
     // -------------------------------------------------------------------------
 
-    /**
-     * Fetch all pages of products and upsert them into the products table.
-     *
-     * @return int Number of products upserted.
-     */
-    private function fetchAndUpsertProducts(Store $store): int
-    {
-        $consumerKey    = Crypt::decryptString($store->auth_key_encrypted);
-        $consumerSecret = Crypt::decryptString($store->auth_secret_encrypted);
-
-        $client = new WooCommerceClient(
-            domain:         $store->domain,
-            consumerKey:    $consumerKey,
-            consumerSecret: $consumerSecret,
-        );
-
-        // Use last_synced_at as the modified_after cursor; null = full sync.
-        $modifiedAfter = $store->last_synced_at?->utc()->toIso8601String();
-
-        $page       = 1;
-        $totalPages = 1;
-        $total      = 0;
-
-        do {
-            $result     = $client->fetchProductsPage($modifiedAfter, $page);
-            $products   = $result['products'];
-            $totalPages = $result['total_pages'];
-
-            if (empty($products)) {
-                break;
-            }
-
-            $this->upsertProducts($store, $products);
-            $total += count($products);
-            $page++;
-        } while ($page <= $totalPages);
-
-        return $total;
-    }
-
-    /**
-     * Map and upsert a batch of WooCommerce product objects.
-     *
-     * @param array<int, array<string, mixed>> $wcProducts
-     */
-    private function upsertProducts(Store $store, array $wcProducts): void
-    {
-        $now  = now()->toDateTimeString();
-        $rows = [];
-
-        foreach ($wcProducts as $product) {
-            $imageUrl = null;
-            if (!empty($product['images'][0]['src'])) {
-                $imageUrl = (string) $product['images'][0]['src'];
-            }
-
-            $price = null;
-            if (isset($product['price']) && $product['price'] !== '') {
-                $price = (float) $product['price'];
-            }
-
-            $platformUpdatedAt = null;
-            if (!empty($product['date_modified_gmt'])) {
-                $platformUpdatedAt = Carbon::parse($product['date_modified_gmt'])->utc()->toDateTimeString();
-            }
-
-            $rows[] = [
-                'workspace_id'        => $store->workspace_id,
-                'store_id'            => $store->id,
-                'external_id'         => (string) $product['id'],
-                'name'                => mb_substr((string) ($product['name'] ?? ''), 0, 500),
-                'sku'                 => $this->nullableString($product['sku'] ?? null),
-                'price'               => $price,
-                'status'              => $this->nullableString($product['status'] ?? null),
-                'image_url'           => $imageUrl,
-                'product_url'         => $this->nullableString($product['permalink'] ?? null),
-                'platform_updated_at' => $platformUpdatedAt,
-                'created_at'          => $now,
-                'updated_at'          => $now,
-            ];
-        }
-
-        DB::table('products')->upsert(
-            $rows,
-            uniqueBy: ['store_id', 'external_id'],
-            update: [
-                'name', 'sku', 'price', 'status',
-                'image_url', 'product_url', 'platform_updated_at', 'updated_at',
-            ],
-        );
-    }
-
-    private function nullableString(mixed $value): ?string
-    {
-        if ($value === null || $value === '') {
-            return null;
-        }
-
-        return (string) $value;
-    }
-
     private function onSuccess(Store $store): void
     {
         $updates = ['consecutive_sync_failures' => 0];
@@ -261,5 +167,17 @@ class SyncProductsJob implements ShouldQueue
         }
 
         $store->update($updates);
+    }
+
+    private function isWorkspaceFrozen(): bool
+    {
+        $workspace = Workspace::withoutGlobalScopes()
+            ->select(['id', 'trial_ends_at', 'billing_plan'])
+            ->find($this->workspaceId);
+
+        return $workspace !== null
+            && $workspace->trial_ends_at !== null
+            && $workspace->trial_ends_at->lt(now())
+            && $workspace->billing_plan === null;
     }
 }

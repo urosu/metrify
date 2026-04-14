@@ -105,6 +105,8 @@ export default function StoreOverview({
                         value={metrics ? formatNumber(metrics.orders) : null}
                         change={changes.orders}
                         loading={navigating}
+                        tooltip="Completed and processing orders in this period. Real-time via webhooks — a nightly reconciliation job backfills any missed orders from the last 7 days."
+                        helpLink="/help/data-accuracy#order-counts"
                     />
                     <MetricCard
                         label="AOV"

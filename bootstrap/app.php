@@ -15,16 +15,19 @@ return Application::configure(basePath: dirname(__DIR__))
     )
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->web(append: [
-            \App\Http\Middleware\HandleInertiaRequests::class,
-            \Illuminate\Http\Middleware\AddLinkHeadersForPreloadedAssets::class,
+            // SetActiveWorkspace must run before HandleInertiaRequests so that
+            // WorkspaceContext is populated when share() reads it.
             \App\Http\Middleware\SetActiveWorkspace::class,
             \App\Http\Middleware\EnforceBillingAccess::class,
+            \App\Http\Middleware\HandleInertiaRequests::class,
+            \Illuminate\Http\Middleware\AddLinkHeadersForPreloadedAssets::class,
         ]);
 
         $middleware->alias([
             'workspace'   => \App\Http\Middleware\SetActiveWorkspace::class,
             'billing'     => \App\Http\Middleware\EnforceBillingAccess::class,
             'super_admin' => \App\Http\Middleware\RequireSuperAdmin::class,
+            'onboarded'   => \App\Http\Middleware\EnsureOnboardingComplete::class,
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {

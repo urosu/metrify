@@ -10,6 +10,7 @@ use App\Models\Store;
 use App\Models\Workspace;
 use App\Models\WorkspaceInvitation;
 use App\Observers\AlertObserver;
+use App\Observers\WorkspaceObserver;
 use App\Policies\StorePolicy;
 use App\Policies\WorkspaceInvitationPolicy;
 use App\Policies\WorkspacePolicy;
@@ -65,5 +66,6 @@ class AppServiceProvider extends ServiceProvider
     {
         Event::listen(WebhookReceived::class, SyncBillingPlanFromStripe::class);
         Alert::observe(AlertObserver::class);
+        Workspace::observe(WorkspaceObserver::class);
     }
 }

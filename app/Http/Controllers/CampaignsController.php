@@ -7,7 +7,10 @@ namespace App\Http\Controllers;
 use App\Models\AdAccount;
 use App\Models\AdInsight;
 use App\Models\DailySnapshot;
+use App\Models\Workspace;
+use App\Services\RevenueAttributionService;
 use App\Services\WorkspaceContext;
+use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Inertia\Inertia;
@@ -15,9 +18,14 @@ use Inertia\Response;
 
 class CampaignsController extends Controller
 {
+    public function __construct(
+        private readonly RevenueAttributionService $attribution,
+    ) {}
+
     public function __invoke(Request $request): Response
     {
         $workspaceId = app(WorkspaceContext::class)->id();
+        $workspace   = Workspace::withoutGlobalScopes()->findOrFail($workspaceId);
         $params      = $this->validateParams($request);
 
         $adAccounts = AdAccount::withoutGlobalScopes()
@@ -26,32 +34,41 @@ class CampaignsController extends Controller
             ->get();
 
         $adAccountList = $adAccounts->map(fn ($a) => [
-            'id'       => $a->id,
-            'platform' => $a->platform,
-            'name'     => $a->name,
+            'id'             => $a->id,
+            'platform'       => $a->platform,
+            'name'           => $a->name,
+            'status'         => $a->status,
+            'last_synced_at' => $a->last_synced_at,
         ])->values()->all();
+
+        [$totalRevenue, $unattributedRevenue] = $this->computeRevenueContext(
+            $workspaceId, $workspace->has_store, $params['from'], $params['to'],
+        );
 
         if ($adAccounts->isEmpty()) {
             return Inertia::render('Campaigns/Index', [
-                'has_ad_accounts'    => false,
-                'ad_accounts'        => [],
-                'metrics'            => null,
-                'compare_metrics'    => null,
-                'campaigns'          => [],
-                'platform_breakdown' => [],
-                'chart_data'         => [],
-                'compare_chart_data' => null,
+                'has_ad_accounts'       => false,
+                'ad_accounts'           => [],
+                'metrics'               => null,
+                'compare_metrics'       => null,
+                'campaigns'             => [],
+                'platform_breakdown'    => [],
+                'chart_data'            => [],
+                'compare_chart_data'    => null,
+                'total_revenue'         => $totalRevenue,
+                'unattributed_revenue'  => $unattributedRevenue,
+                'workspace_target_roas' => $workspace->target_roas ? (float) $workspace->target_roas : null,
                 ...$params,
             ]);
         }
 
-        // Filter ad accounts by selected platform, then optionally by specific account
+        // Filter ad accounts by selected platform, then optionally by specific accounts
         $filteredAccounts = $params['platform'] === 'all'
             ? $adAccounts
             : $adAccounts->where('platform', $params['platform']);
 
-        if ($params['ad_account_id'] !== null) {
-            $filteredAccounts = $filteredAccounts->where('id', $params['ad_account_id']);
+        if (! empty($params['ad_account_ids'])) {
+            $filteredAccounts = $filteredAccounts->whereIn('id', $params['ad_account_ids']);
         }
 
         $adAccountIds = $filteredAccounts->pluck('id')->all();
@@ -79,7 +96,7 @@ class CampaignsController extends Controller
             $params['to'],
             $params['platform'],
             $params['status'],
-            $params['ad_account_id'],
+            $params['ad_account_ids'],
         );
 
         // Sort in PHP to handle NULLs (always last regardless of direction)
@@ -108,49 +125,60 @@ class CampaignsController extends Controller
             : null;
 
         return Inertia::render('Campaigns/Index', [
-            'has_ad_accounts'    => true,
-            'ad_accounts'        => $adAccountList,
-            'metrics'            => $metrics,
-            'compare_metrics'    => $compareMetrics,
-            'campaigns'          => $campaigns,
-            'platform_breakdown' => $platformBreakdown,
-            'chart_data'         => $chartData,
-            'compare_chart_data' => $compareChartData,
+            'has_ad_accounts'      => true,
+            'ad_accounts'          => $adAccountList,
+            'metrics'              => $metrics,
+            'compare_metrics'      => $compareMetrics,
+            'campaigns'            => $campaigns,
+            'platform_breakdown'   => $platformBreakdown,
+            'chart_data'           => $chartData,
+            'compare_chart_data'   => $compareChartData,
+            'total_revenue'        => $totalRevenue,
+            'unattributed_revenue' => $unattributedRevenue,
+            // Workspace ROAS target — used for Winners/Losers filter chips.
+            // Falls back to 1.0 on the frontend when null (break-even threshold).
+            'workspace_target_roas' => $workspace->target_roas ? (float) $workspace->target_roas : null,
             ...$params,
         ]);
     }
 
     // ─── Parameter validation ─────────────────────────────────────────────────
 
-    /** @return array{from:string,to:string,compare_from:string|null,compare_to:string|null,granularity:string,platform:string,status:string,view:string,sort:string,direction:string,ad_account_id:int|null} */
+    /** @return array{from:string,to:string,compare_from:string|null,compare_to:string|null,granularity:string,platform:string,status:string,view:string,sort:string,direction:string,ad_account_ids:int[]} */
     private function validateParams(Request $request): array
     {
         $v = $request->validate([
-            'from'           => ['sometimes', 'nullable', 'date_format:Y-m-d'],
-            'to'             => ['sometimes', 'nullable', 'date_format:Y-m-d'],
-            'compare_from'   => ['sometimes', 'nullable', 'date_format:Y-m-d'],
-            'compare_to'     => ['sometimes', 'nullable', 'date_format:Y-m-d'],
-            'granularity'    => ['sometimes', 'nullable', 'in:hourly,daily,weekly'],
-            'platform'       => ['sometimes', 'nullable', 'in:all,facebook,google'],
-            'status'         => ['sometimes', 'nullable', 'in:all,active,paused'],
-            'view'           => ['sometimes', 'nullable', 'in:table,quadrant'],
-            'sort'           => ['sometimes', 'nullable', 'in:real_roas,real_cpo,spend,attributed_revenue'],
-            'direction'      => ['sometimes', 'nullable', 'in:asc,desc'],
-            'ad_account_id'  => ['sometimes', 'nullable', 'integer', 'min:1'],
+            'from'            => ['sometimes', 'nullable', 'date_format:Y-m-d'],
+            'to'              => ['sometimes', 'nullable', 'date_format:Y-m-d', 'after_or_equal:from'],
+            'compare_from'    => ['sometimes', 'nullable', 'date_format:Y-m-d'],
+            'compare_to'      => ['sometimes', 'nullable', 'date_format:Y-m-d', 'after_or_equal:compare_from'],
+            'granularity'     => ['sometimes', 'nullable', 'in:hourly,daily,weekly'],
+            'platform'        => ['sometimes', 'nullable', 'in:all,facebook,google'],
+            'status'          => ['sometimes', 'nullable', 'in:all,active,paused'],
+            'view'            => ['sometimes', 'nullable', 'in:table,quadrant'],
+            'sort'            => ['sometimes', 'nullable', 'in:real_roas,real_cpo,spend,attributed_revenue,spend_velocity'],
+            'direction'       => ['sometimes', 'nullable', 'in:asc,desc'],
+            'ad_account_ids'  => ['sometimes', 'nullable', 'string'],
         ]);
 
+        // Parse comma-separated ad account IDs
+        $adAccountIds = array_values(array_filter(
+            array_map('intval', explode(',', $v['ad_account_ids'] ?? '')),
+            fn ($id) => $id > 0
+        ));
+
         return [
-            'from'           => $v['from']          ?? now()->subDays(29)->toDateString(),
-            'to'             => $v['to']             ?? now()->toDateString(),
-            'compare_from'   => $v['compare_from']   ?? null,
-            'compare_to'     => $v['compare_to']     ?? null,
-            'granularity'    => $v['granularity']    ?? 'daily',
-            'platform'       => $v['platform']       ?? 'all',
-            'status'         => $v['status']         ?? 'all',
-            'view'           => $v['view']           ?? 'table',
-            'sort'           => $v['sort']           ?? 'real_roas',
-            'direction'      => $v['direction']      ?? 'desc',
-            'ad_account_id'  => isset($v['ad_account_id']) ? (int) $v['ad_account_id'] : null,
+            'from'            => $v['from']          ?? now()->subDays(29)->toDateString(),
+            'to'              => $v['to']             ?? now()->toDateString(),
+            'compare_from'    => $v['compare_from']   ?? null,
+            'compare_to'      => $v['compare_to']     ?? null,
+            'granularity'     => $v['granularity']    ?? 'daily',
+            'platform'        => $v['platform']       ?? 'all',
+            'status'          => $v['status']         ?? 'all',
+            'view'            => $v['view']           ?? 'table',
+            'sort'            => $v['sort']           ?? 'real_roas',
+            'direction'       => $v['direction']      ?? 'desc',
+            'ad_account_ids'  => $adAccountIds,
         ];
     }
 
@@ -226,6 +254,7 @@ class CampaignsController extends Controller
      * @param  \Illuminate\Support\Collection  $adAccounts
      * @return array<int, array<string, mixed>>
      */
+    /** @param int[] $adAccountIds */
     private function computeCampaigns(
         int $workspaceId,
         $adAccounts,
@@ -233,14 +262,14 @@ class CampaignsController extends Controller
         string $to,
         string $platform,
         string $status,
-        ?int $adAccountId = null,
+        array $adAccountIds = [],
     ): array {
         $filteredAccounts = $platform === 'all'
             ? $adAccounts
             : $adAccounts->where('platform', $platform);
 
-        if ($adAccountId !== null) {
-            $filteredAccounts = $filteredAccounts->where('id', $adAccountId);
+        if (! empty($adAccountIds)) {
+            $filteredAccounts = $filteredAccounts->whereIn('id', $adAccountIds);
         }
 
         if ($filteredAccounts->isEmpty()) {
@@ -263,12 +292,15 @@ class CampaignsController extends Controller
                 c.name,
                 aa.platform,
                 c.status,
+                c.daily_budget,
+                c.lifetime_budget,
+                c.budget_type,
                 COALESCE(SUM(ai.spend_in_reporting_currency), 0) AS total_spend,
                 COALESCE(SUM(ai.impressions), 0)                 AS total_impressions,
                 COALESCE(SUM(ai.clicks), 0)                      AS total_clicks,
                 AVG(ai.platform_roas)                            AS avg_platform_roas
             FROM ad_insights ai
-            JOIN campaigns c   ON c.id  = ai.campaign_id
+            JOIN campaigns c    ON c.id  = ai.campaign_id
             JOIN ad_accounts aa ON aa.id = ai.ad_account_id
             WHERE ai.workspace_id = ?
               AND ai.ad_account_id IN ({$placeholders})
@@ -276,22 +308,49 @@ class CampaignsController extends Controller
               AND ai.hour IS NULL
               AND ai.date BETWEEN ? AND ?
               {$statusFilter}
-            GROUP BY c.id, c.name, aa.platform, c.status
+            GROUP BY c.id, c.name, aa.platform, c.status, c.daily_budget, c.lifetime_budget, c.budget_type
         ", array_merge([$workspaceId], $adAccountIds, [$from, $to]));
+
+        // Precompute period/elapsed day counts for spend velocity.
+        // Velocity = (spend / budget_for_period) / (days_elapsed / days_in_period)
+        // A value of 1.0 means perfectly on pace; >1.0 = ahead of budget; <1.0 = behind.
+        $daysInPeriod = Carbon::parse($from)->diffInDays(Carbon::parse($to)) + 1;
+        $daysElapsed  = min(Carbon::parse($from)->diffInDays(Carbon::today()) + 1, $daysInPeriod);
 
         // Build UTM attribution map for matched platforms
         $utmPlatform = $platform === 'all' ? '' : $platform;
         $attrMap     = $this->buildUtmAttributionMap($workspaceId, $from, $to, $utmPlatform);
 
-        return array_map(function (object $row) use ($attrMap, $from, $to): array {
+        return array_map(function (object $row) use ($attrMap, $daysInPeriod, $daysElapsed): array {
             $spend       = (float) $row->total_spend;
             $impressions = (int)   $row->total_impressions;
             $clicks      = (int)   $row->total_clicks;
 
-            $key               = mb_strtolower((string) ($row->name ?? ''));
-            $attr              = $attrMap[$key] ?? null;
+            // Keyed by campaigns.id — see buildUtmAttributionMap for why.
+            $attr              = $attrMap[(int) $row->id] ?? null;
             $attributedRevenue = $attr !== null ? (float) $attr['revenue'] : null;
             $attributedOrders  = $attr !== null ? (int)   $attr['orders']  : 0;
+
+            // Spend velocity: how fast the campaign is burning through its budget vs expected pace.
+            // Null when no budget is set or the period hasn't started yet.
+            $spendVelocity = null;
+            if ($daysInPeriod > 0 && $daysElapsed > 0) {
+                $budgetForPeriod = match ($row->budget_type) {
+                    'daily'    => ($row->daily_budget !== null)
+                        ? (float) $row->daily_budget * $daysInPeriod
+                        : null,
+                    'lifetime' => $row->lifetime_budget !== null
+                        ? (float) $row->lifetime_budget
+                        : null,
+                    default    => null,
+                };
+
+                if ($budgetForPeriod !== null && $budgetForPeriod > 0) {
+                    $expectedPace  = $daysElapsed / $daysInPeriod;
+                    $actualPace    = $spend / $budgetForPeriod;
+                    $spendVelocity = round($actualPace / $expectedPace, 3);
+                }
+            }
 
             return [
                 'id'                 => (int)    $row->id,
@@ -314,15 +373,24 @@ class CampaignsController extends Controller
                     : null,
                 'attributed_revenue' => $attributedRevenue,
                 'attributed_orders'  => $attributedOrders,
+                'spend_velocity'     => $spendVelocity,
             ];
         }, $rows);
     }
 
     /**
-     * Build a map of lowercase campaign name → {revenue, orders} from UTM-tagged orders.
+     * Build a map of campaign internal ID → {revenue, orders} from UTM-tagged orders.
+     *
+     * Matches utm_campaign against both campaigns.external_id (the common case — most ad
+     * platforms write the campaign ID into utm_campaign, e.g. Facebook writes the numeric
+     * campaign ID like "120241558531060383") and campaigns.name (name-based tagging fallback).
+     *
+     * Why external_id match: Facebook/Google ad URL builders default to inserting the platform
+     * campaign ID, not the human-readable name. Without this join the attribution query returns
+     * zero matches even when UTM data is present.
      *
      * @param  string  $platform  '' = all platforms, 'facebook' | 'google' = specific
-     * @return array<string, array{revenue:float,orders:int}>
+     * @return array<int, array{revenue:float,orders:int}>  Keyed by campaigns.id
      */
     private function buildUtmAttributionMap(
         int $workspaceId,
@@ -338,10 +406,16 @@ class CampaignsController extends Controller
 
         $rows = DB::select("
             SELECT
-                LOWER(o.utm_campaign)              AS campaign_key,
+                c.id                               AS campaign_id,
                 SUM(o.total_in_reporting_currency) AS attributed_revenue,
                 COUNT(o.id)                        AS attributed_orders
             FROM orders o
+            JOIN campaigns c
+              ON  c.workspace_id = o.workspace_id
+              AND (
+                    o.utm_campaign = c.external_id
+                 OR LOWER(o.utm_campaign) = LOWER(c.name)
+              )
             WHERE o.workspace_id = ?
               AND o.status IN ('completed', 'processing')
               AND o.total_in_reporting_currency IS NOT NULL
@@ -349,12 +423,12 @@ class CampaignsController extends Controller
               AND o.utm_campaign <> ''
               AND o.occurred_at BETWEEN ? AND ?
               {$sourceFilter}
-            GROUP BY LOWER(o.utm_campaign)
+            GROUP BY c.id
         ", [$workspaceId, $from . ' 00:00:00', $to . ' 23:59:59']);
 
         $map = [];
         foreach ($rows as $row) {
-            $map[(string) $row->campaign_key] = [
+            $map[(int) $row->campaign_id] = [
                 'revenue' => (float) $row->attributed_revenue,
                 'orders'  => (int)   $row->attributed_orders,
             ];
@@ -397,6 +471,55 @@ class CampaignsController extends Controller
         }
 
         return $breakdown;
+    }
+
+    // ─── Revenue context ──────────────────────────────────────────────────────
+
+    /**
+     * Total store revenue + unattributed revenue for the period.
+     *
+     * Only populated when has_store=true. Returns [null, null] otherwise so the
+     * frontend can suppress the revenue context cards entirely.
+     *
+     * See: PLANNING.md "Cross-Channel Page Enhancements" → Campaigns page
+     *
+     * @return array{float|null, float|null}  [total_revenue, unattributed_revenue]
+     */
+    private function computeRevenueContext(
+        int $workspaceId,
+        bool $hasStore,
+        string $from,
+        string $to,
+    ): array {
+        if (! $hasStore) {
+            return [null, null];
+        }
+
+        // Revenue always from daily_snapshots, never aggregated raw orders at query time.
+        // See: PLANNING.md "Key patterns"
+        $snap = DailySnapshot::withoutGlobalScopes()
+            ->where('workspace_id', $workspaceId)
+            ->whereBetween('date', [$from, $to])
+            ->selectRaw('COALESCE(SUM(revenue), 0) AS total_revenue')
+            ->first();
+
+        $totalRevenue = (float) ($snap->total_revenue ?? 0);
+
+        $attributed = $this->attribution->getAttributedRevenue(
+            $workspaceId,
+            Carbon::parse($from)->startOfDay(),
+            Carbon::parse($to)->endOfDay(),
+        );
+
+        $unattributed = $this->attribution->getUnattributedRevenue(
+            $totalRevenue,
+            $attributed['total_tagged'],
+        );
+
+        return [
+            $totalRevenue > 0 ? round($totalRevenue, 2) : null,
+            $unattributed > 0 ? round($unattributed, 2) : null,
+        ];
     }
 
     // ─── Chart ───────────────────────────────────────────────────────────────

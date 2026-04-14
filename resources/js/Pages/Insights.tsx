@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import axios from 'axios';
+import { useEffect, useRef, useState } from 'react';
 import { Head, router, usePage } from '@inertiajs/react';
-import { Bot, Bell, CheckCircle, Eye, AlertTriangle, Info } from 'lucide-react';
+import { Bot, Bell, CheckCircle, AlertTriangle, Info, NotebookPen } from 'lucide-react';
 import AppLayout from '@/Components/layouts/AppLayout';
 import { PageHeader } from '@/Components/shared/PageHeader';
 import { formatDate, formatDatetime } from '@/lib/formatters';
@@ -27,6 +28,12 @@ interface AlertRow {
     created_at: string;
 }
 
+interface DailyNoteRow {
+    id: number;
+    date: string;
+    note: string;
+}
+
 interface PaginatedAlerts {
     data: AlertRow[];
     current_page: number;
@@ -36,12 +43,72 @@ interface PaginatedAlerts {
 
 interface Props {
     ai_summaries: AiSummaryData[];
+    daily_notes: DailyNoteRow[];
     alerts: PaginatedAlerts;
     filters: { severity: string; status: string };
 }
 
+// ─── Inline note editor ───────────────────────────────────────────────────────
+
+function InsightNoteCell({ id, date, note }: DailyNoteRow) {
+    const [value, setValue] = useState(note);
+    const [saving, setSaving] = useState(false);
+    const [savedFlash, setSavedFlash] = useState(false);
+    const lastSavedRef = useRef(note);
+    const focusedRef   = useRef(false);
+
+    function save(current: string): void {
+        if (current === lastSavedRef.current) return;
+        setSaving(true);
+        axios
+            .post(`/analytics/notes/${date}`, { note: current })
+            .then(() => {
+                lastSavedRef.current = current;
+                setSavedFlash(true);
+                setTimeout(() => setSavedFlash(false), 2000);
+            })
+            .catch(() => setValue(lastSavedRef.current))
+            .finally(() => setSaving(false));
+    }
+
+    return (
+        <div key={id} className="flex gap-4 rounded-lg border border-zinc-100 px-4 py-3 transition-colors hover:bg-zinc-50">
+            <div className="w-20 shrink-0 pt-0.5">
+                <span className="text-xs font-medium text-zinc-500">
+                    {(() => {
+                        const d = new Date(date);
+                        return d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'numeric' });
+                    })()}
+                </span>
+            </div>
+            <div className="relative min-w-0 flex-1">
+                <textarea
+                    value={value}
+                    onChange={(e) => setValue(e.target.value)}
+                    onFocus={() => { focusedRef.current = true; }}
+                    onBlur={(e) => {
+                        focusedRef.current = false;
+                        save(e.currentTarget.value);
+                    }}
+                    onKeyDown={(e) => {
+                        if (e.key === 'Escape') {
+                            setValue(lastSavedRef.current);
+                            e.currentTarget.blur();
+                        }
+                    }}
+                    maxLength={1000}
+                    rows={1}
+                    className="w-full resize-none rounded border border-transparent bg-transparent px-0 py-0 text-sm text-zinc-700 outline-none transition-colors placeholder:text-zinc-300 hover:border-zinc-200 hover:bg-white hover:px-2 focus:border-primary/40 focus:bg-white focus:px-2 focus:shadow-sm"
+                />
+                {saving     && <span className="absolute right-0 top-0 text-[10px] text-zinc-400">saving…</span>}
+                {!saving && savedFlash && <span className="absolute right-0 top-0 text-[10px] text-green-500">saved</span>}
+            </div>
+        </div>
+    );
+}
+
 const SEVERITY_COLORS = {
-    info:     'bg-indigo-100 text-indigo-700',
+    info:     'bg-primary/15 text-primary',
     warning:  'bg-amber-100 text-amber-700',
     critical: 'bg-red-100 text-red-700',
 } as const;
@@ -58,7 +125,7 @@ function formatAlertType(type: string): string {
         .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
-export default function Insights({ ai_summaries, alerts, filters }: Props) {
+export default function Insights({ ai_summaries, daily_notes, alerts, filters }: Props) {
     const { workspace } = usePage<PageProps>().props;
     const timezone = workspace?.reporting_timezone;
     const [navigating, setNavigating] = useState(false);
@@ -73,12 +140,12 @@ export default function Insights({ ai_summaries, alerts, filters }: Props) {
         router.get('/insights', { ...filters, [key]: value }, { preserveState: true, replace: true });
     }
 
-    function markRead(alertId: number): void {
-        router.post(`/insights/alerts/${alertId}/read`, {}, { preserveScroll: true });
+    function dismiss(alertId: number): void {
+        router.post(`/insights/alerts/${alertId}/dismiss`, {}, { preserveScroll: true });
     }
 
-    function resolve(alertId: number): void {
-        router.post(`/insights/alerts/${alertId}/resolve`, {}, { preserveScroll: true });
+    function dismissAll(): void {
+        router.post('/insights/alerts/dismiss-all', {}, { preserveScroll: true });
     }
 
     const severityTabs = ['all', 'info', 'warning', 'critical'] as const;
@@ -135,16 +202,52 @@ export default function Insights({ ai_summaries, alerts, filters }: Props) {
                 )}
             </section>
 
+            {/* ── Daily Notes ──────────────────────────────────────────────── */}
+            <section className="mb-8">
+                <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+                    Daily Notes
+                </h2>
+
+                {daily_notes.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center rounded-xl border border-zinc-200 bg-white px-6 py-12 text-center">
+                        <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-zinc-100">
+                            <NotebookPen className="h-5 w-5 text-zinc-400" />
+                        </div>
+                        <p className="text-sm font-medium text-zinc-900">No notes yet</p>
+                        <p className="mt-1 text-xs text-zinc-400">
+                            Add daily notes from the Overview page or the Daily Breakdown table.
+                        </p>
+                    </div>
+                ) : (
+                    <div className="rounded-xl border border-zinc-200 bg-white p-4 space-y-1">
+                        {daily_notes.map((n) => (
+                            <InsightNoteCell key={n.id} {...n} />
+                        ))}
+                    </div>
+                )}
+            </section>
+
             {/* ── Alert Feed ────────────────────────────────────────────────── */}
             <section>
-                <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-zinc-400">
-                    Alert Feed
-                    {alerts.total > 0 && (
-                        <span className="ml-2 rounded-full bg-zinc-100 px-2 py-0.5 text-xs font-normal text-zinc-500">
-                            {alerts.total}
-                        </span>
+                <div className="mb-3 flex items-center justify-between">
+                    <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-400">
+                        Alert Feed
+                        {alerts.total > 0 && (
+                            <span className="ml-2 rounded-full bg-zinc-100 px-2 py-0.5 text-xs font-normal text-zinc-500">
+                                {alerts.total}
+                            </span>
+                        )}
+                    </h2>
+                    {alerts.data.some((a) => !a.resolved_at) && (
+                        <button
+                            onClick={dismissAll}
+                            className="flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-500 hover:bg-zinc-50 hover:text-zinc-700 transition-colors"
+                        >
+                            <CheckCircle className="h-3.5 w-3.5" />
+                            Dismiss all
+                        </button>
                     )}
-                </h2>
+                </div>
 
                 {/* Filter bar */}
                 <div className="mb-4 flex flex-wrap gap-3">
@@ -239,7 +342,7 @@ export default function Insights({ ai_summaries, alerts, filters }: Props) {
                                                     {alert.severity}
                                                 </span>
                                                 {!isRead && !isResolved && (
-                                                    <span className="h-1.5 w-1.5 rounded-full bg-indigo-500" title="Unread" />
+                                                    <span className="h-1.5 w-1.5 rounded-full bg-primary" title="Unread" />
                                                 )}
                                             </div>
                                             {(alert.store_name ?? alert.ad_account_name) && (
@@ -255,23 +358,13 @@ export default function Insights({ ai_summaries, alerts, filters }: Props) {
                                         {/* Actions */}
                                         {!isResolved && (
                                             <div className="flex shrink-0 items-center gap-1">
-                                                {!isRead && (
-                                                    <button
-                                                        onClick={() => markRead(alert.id)}
-                                                        className="flex items-center gap-1 rounded px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700 transition-colors"
-                                                        title="Mark as read"
-                                                    >
-                                                        <Eye className="h-3.5 w-3.5" />
-                                                        Read
-                                                    </button>
-                                                )}
                                                 <button
-                                                    onClick={() => resolve(alert.id)}
+                                                    onClick={() => dismiss(alert.id)}
                                                     className="flex items-center gap-1 rounded px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700 transition-colors"
-                                                    title="Mark as resolved"
+                                                    title="Dismiss"
                                                 >
                                                     <CheckCircle className="h-3.5 w-3.5" />
-                                                    Resolve
+                                                    Dismiss
                                                 </button>
                                             </div>
                                         )}

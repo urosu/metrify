@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Jobs;
 
+use App\Models\Workspace;
 use App\Services\WorkspaceContext;
 use Carbon\Carbon;
 use Illuminate\Bus\Queueable;
@@ -64,6 +65,15 @@ class ComputeDailySnapshotJob implements ShouldQueue
         $dateStr     = $this->date->toDateString();
 
         app(WorkspaceContext::class)->set($workspaceId);
+
+        // Discard snapshot jobs queued before trial expiry.
+        $ws = Workspace::withoutGlobalScopes()
+            ->select(['id', 'trial_ends_at', 'billing_plan'])
+            ->find($workspaceId);
+        if ($ws && $ws->trial_ends_at !== null && $ws->trial_ends_at->lt(now()) && $ws->billing_plan === null) {
+            Log::info('ComputeDailySnapshotJob: skipped — workspace trial expired', ['workspace_id' => $workspaceId]);
+            return;
+        }
 
         // A. Core order metrics ---------------------------------------------------
         $core = DB::table('orders')
@@ -126,31 +136,17 @@ class ComputeDailySnapshotJob implements ShouldQueue
         $newCustomers       = (int) ($customerStats->new_customers ?? 0);
         $returningCustomers = (int) ($customerStats->returning_customers ?? 0);
 
-        // D. Revenue by country ---------------------------------------------------
-        $countryRows = DB::table('orders')
-            ->selectRaw('customer_country, SUM(total_in_reporting_currency) AS revenue')
-            ->where('store_id', $this->storeId)
-            ->whereRaw("occurred_at::date = ?", [$dateStr])
-            ->whereIn('status', ['completed', 'processing'])
-            ->whereNotNull('customer_country')
-            ->whereNotNull('total_in_reporting_currency')
-            ->groupBy('customer_country')
-            ->orderByDesc('revenue')
-            ->get();
-
-        $revenueByCountry = $countryRows->isEmpty()
-            ? null
-            : $countryRows->mapWithKeys(fn ($row) => [
-                $row->customer_country => round((float) $row->revenue, 4),
-            ])->all();
-
-        // E. Top 10 products ------------------------------------------------------
+        // D. Top 50 products — written to daily_snapshot_products (normalized table) ----------
+        // Why: daily_snapshots.top_products JSONB was dropped in favour of this normalized
+        // table so Phase 1 can query with proper filtering, sorting, and trending deltas.
+        // See: PLANNING.md "daily_snapshot_products"
+        // Related: app/Models/DailySnapshotProduct.php
         $productRows = DB::table('order_items as oi')
             ->join('orders as o', 'o.id', '=', 'oi.order_id')
             ->selectRaw("
                 oi.product_external_id,
-                MAX(oi.product_name) AS product_name,
-                SUM(oi.quantity)::int AS units,
+                MAX(oi.product_name)                                                       AS product_name,
+                SUM(oi.quantity)::int                                                      AS units,
                 SUM(oi.line_total * (o.total_in_reporting_currency / NULLIF(o.total, 0))) AS revenue
             ")
             ->where('o.store_id', $this->storeId)
@@ -159,17 +155,8 @@ class ComputeDailySnapshotJob implements ShouldQueue
             ->whereNotNull('o.total_in_reporting_currency')
             ->groupBy('oi.product_external_id')
             ->orderByDesc('revenue')
-            ->limit(10)
+            ->limit(50)
             ->get();
-
-        $topProducts = $productRows->isEmpty()
-            ? null
-            : $productRows->map(fn ($row) => [
-                'external_id' => $row->product_external_id,
-                'name'        => $row->product_name,
-                'units'       => (int) $row->units,
-                'revenue'     => round((float) $row->revenue, 4),
-            ])->values()->all();
 
         // Upsert ------------------------------------------------------------------
         $now = now()->toDateTimeString();
@@ -187,8 +174,6 @@ class ComputeDailySnapshotJob implements ShouldQueue
                 'items_per_order'     => $itemsPerOrder,
                 'new_customers'       => $newCustomers,
                 'returning_customers' => $returningCustomers,
-                'revenue_by_country'  => $revenueByCountry !== null ? json_encode($revenueByCountry) : null,
-                'top_products'        => $topProducts !== null ? json_encode($topProducts) : null,
                 'created_at'          => $now,
                 'updated_at'          => $now,
             ]],
@@ -196,9 +181,32 @@ class ComputeDailySnapshotJob implements ShouldQueue
             [
                 'orders_count', 'revenue', 'revenue_native', 'aov',
                 'items_sold', 'items_per_order', 'new_customers', 'returning_customers',
-                'revenue_by_country', 'top_products', 'updated_at',
+                'updated_at',
             ],
         );
+
+        // Upsert top products into normalized daily_snapshot_products ----------------
+        if ($productRows->isNotEmpty()) {
+            $productUpsertRows = $productRows->values()->map(function ($row, int $idx) use ($workspaceId, $dateStr, $now): array {
+                return [
+                    'workspace_id'        => $workspaceId,
+                    'store_id'            => $this->storeId,
+                    'snapshot_date'       => $dateStr,
+                    'product_external_id' => $row->product_external_id,
+                    'product_name'        => mb_substr((string) $row->product_name, 0, 500),
+                    'revenue'             => round((float) $row->revenue, 4),
+                    'units'               => (int) $row->units,
+                    'rank'                => $idx + 1,
+                    'created_at'          => $now,
+                ];
+            })->all();
+
+            DB::table('daily_snapshot_products')->upsert(
+                $productUpsertRows,
+                ['store_id', 'snapshot_date', 'product_external_id'],
+                ['product_name', 'revenue', 'units', 'rank'],
+            );
+        }
 
         Log::info('ComputeDailySnapshotJob: snapshot computed', [
             'store_id'     => $this->storeId,

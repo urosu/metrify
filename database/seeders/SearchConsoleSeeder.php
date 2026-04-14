@@ -214,11 +214,13 @@ class SearchConsoleSeeder extends Seeder
             foreach ($pages as $path => $base) {
                 $pClicks = max(0, (int) ($base['clicks'] * $variance * mt_rand(70, 130) / 100));
                 $pImpr   = (int) ($base['impr'] * $variance * mt_rand(80, 120) / 100);
+                $pageUrl = $baseUrl . $path;
                 GscPage::create([
                     'property_id'  => $propertyId,
                     'workspace_id' => $workspaceId,
                     'date'         => $date,
-                    'page'         => $baseUrl . $path,
+                    'page'         => $pageUrl,
+                    'page_hash'    => hash('sha256', $pageUrl),
                     'clicks'       => $pClicks,
                     'impressions'  => $pImpr,
                     'ctr'          => $pImpr > 0 ? round($pClicks / $pImpr, 6) : null,

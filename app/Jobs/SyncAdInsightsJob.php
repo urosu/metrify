@@ -9,12 +9,9 @@ use App\Exceptions\FacebookTokenExpiredException;
 use App\Exceptions\GoogleAccountDisabledException;
 use App\Exceptions\GoogleRateLimitException;
 use App\Exceptions\GoogleTokenExpiredException;
-use App\Models\Ad;
+use App\Jobs\Concerns\SyncsAdInsights;
 use App\Models\AdAccount;
-use App\Models\AdInsight;
-use App\Models\Adset;
 use App\Models\Alert;
-use App\Models\Campaign;
 use App\Models\SyncLog;
 use App\Models\Workspace;
 use App\Services\Fx\FxRateService;
@@ -27,13 +24,14 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Throwable;
 
 /**
- * Syncs ad insights for a single Facebook ad account.
+ * Syncs ad insights for a single ad account (Facebook or Google).
  *
  * Queue:   default
  * Timeout: 300 s
@@ -41,17 +39,19 @@ use Throwable;
  * Backoff: [60, 300, 900] s (default)
  *
  * On every run:
- *   1. Sync campaign / adset / ad structure (idempotent upsert).
+ *   1. Sync campaign / adset / ad structure (idempotent upsert, gated to once/23h).
  *   2. Fetch daily insights for the last 3 days at campaign level.
- *   3. Fetch daily insights for the last 3 days at ad level.
- *   4. Convert spend to reporting_currency using FxRateService (DB-first).
+ *   3. Fetch daily insights for the last 3 days at adset level.
+ *   4. Fetch daily insights for the last 3 days at ad level.
+ *   5. Convert spend to reporting_currency using FxRateService (DB-first).
  *
- * Dispatched every 3 hours per active ad account via schedule closure in console.php.
- * Also dispatched immediately after a new Facebook ad account is connected.
+ * Dispatched hourly per active ad account via schedule closure in console.php.
+ * Also dispatched immediately after a new ad account is connected.
  */
 class SyncAdInsightsJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
+    use SyncsAdInsights;
 
     public int $timeout = 300;
     public int $tries   = 3;
@@ -70,6 +70,14 @@ class SyncAdInsightsJob implements ShouldQueue
     {
         app(WorkspaceContext::class)->set($this->workspaceId);
 
+        // Why: jobs queued before trial expiry must be discarded on pickup.
+        // Dispatch filters in console.php prevent NEW dispatches for frozen workspaces,
+        // but jobs already in the queue need this in-job guard. See PLANNING.md "14-day free trial".
+        if ($this->isWorkspaceFrozen()) {
+            Log::info('SyncAdInsightsJob: skipped — workspace trial expired', ['workspace_id' => $this->workspaceId]);
+            return;
+        }
+
         /** @var AdAccount|null $account */
         $account = AdAccount::withoutGlobalScopes()->find($this->adAccountId);
 
@@ -84,6 +92,31 @@ class SyncAdInsightsJob implements ShouldQueue
             return;
         }
 
+        // Skip regular sync while a historical import is pending or running.
+        // Why: both jobs share the same rate-limit bucket. SyncAdInsightsJob runs on the
+        // 'default' queue (higher priority than 'low'), so it executes before the historical
+        // import and can exhaust the dev-tier quota (60 points) before the import starts.
+        // 'pending' is included because the controller sets that status before dispatching,
+        // so the import hasn't started yet but will start shortly.
+        if (in_array($account->historical_import_status, ['pending', 'running'], strict: true)) {
+            Log::info('SyncAdInsightsJob: skipping — historical import pending or in progress', [
+                'ad_account_id' => $this->adAccountId,
+                'import_status' => $account->historical_import_status,
+            ]);
+            return;
+        }
+
+        // Concurrency lock — prevent two SyncAdInsightsJob instances from running
+        // simultaneously for the same ad account. Without this, the scheduler could
+        // dispatch a second sync before the first completes, doubling API usage.
+        $lock = Cache::lock("sync_ad_insights_{$this->adAccountId}", 600);
+        if (! $lock->get()) {
+            Log::info('SyncAdInsightsJob: skipping — another instance is already running', [
+                'ad_account_id' => $this->adAccountId,
+            ]);
+            return;
+        }
+
         $syncLog = SyncLog::create([
             'workspace_id'      => $this->workspaceId,
             'syncable_type'     => AdAccount::class,
@@ -91,6 +124,8 @@ class SyncAdInsightsJob implements ShouldQueue
             'job_type'          => self::class,
             'status'            => 'running',
             'started_at'        => now(),
+            'queue'             => 'default',
+            'attempt'           => $this->attempts(),
         ]);
 
         try {
@@ -116,14 +151,22 @@ class SyncAdInsightsJob implements ShouldQueue
             ]);
         } catch (FacebookRateLimitException | GoogleRateLimitException $e) {
             // Close the sync log so it doesn't stay stuck at 'running'
+            $usageStr = $e instanceof FacebookRateLimitException && $e->usagePct !== null
+                ? " (usage: {$e->usagePct}%)" : '';
             $syncLog->update([
                 'status'           => 'failed',
-                'error_message'    => "Rate limited — retrying after {$e->retryAfter}s",
+                'error_message'    => "Rate limited — retrying after {$e->retryAfter}s{$usageStr}",
                 'completed_at'     => now(),
                 'duration_seconds' => max(0, (int) now()->diffInSeconds($syncLog->started_at)),
             ]);
-            // Re-queue without consuming an attempt
-            $this->release($e->retryAfter);
+            // Why: release() increments the attempt counter, so 3 rate-limit hits would
+            // exhaust tries=3 and trigger failed() with MaxAttemptsExceededException, which
+            // falsely increments consecutive_sync_failures. Dispatching a fresh job resets
+            // the attempt counter so rate limits never pollute the failure health check.
+            self::dispatch($this->adAccountId, $this->workspaceId)
+                ->delay(now()->addSeconds($e->retryAfter))
+                ->onQueue('default');
+            $this->delete();
             return;
         } catch (FacebookTokenExpiredException | GoogleTokenExpiredException $e) {
             $this->markTokenExpired($account, $syncLog, $e);
@@ -136,6 +179,8 @@ class SyncAdInsightsJob implements ShouldQueue
         } catch (Throwable $e) {
             $this->handleSyncFailure($account, $syncLog, $e);
             throw $e;
+        } finally {
+            $lock->release();
         }
     }
 
@@ -154,13 +199,48 @@ class SyncAdInsightsJob implements ShouldQueue
         $since = now()->subDays(3)->toDateString();
         $until = now()->toDateString();
 
-        $this->syncStructure($client, $account, $this->workspaceId);
+        // Gate structure sync to once per 23 hours.
+        // Why: campaigns/adsets/ads rarely change. Running syncStructure (3 API calls) on
+        // every hourly insights sync burns ~75% of the dev-tier rate-limit budget before
+        // any insights data is fetched. Gating to daily drops cost from 4+ calls/sync to
+        // 1 call/sync, letting us run hourly without exhausting quota.
+        // Caveat: new ads created today won't appear in insights until the next structure sync.
+        $needsStructureSync = $account->last_structure_synced_at === null
+            || $account->last_structure_synced_at->lt(now()->subHours(23));
 
-        $campaignInsights = $client->fetchInsights($account->external_id, 'campaign', $since, $until);
-        $adInsights       = $client->fetchInsights($account->external_id, 'ad', $since, $until);
+        if ($needsStructureSync) {
+            // Pass includeCreative: false — creative fields are Phase 2 (correlation engine)
+            // and aren't worth the extra nested Graph API cost on every daily structure sync.
+            // The historical import's syncStructure always fetches creative.
+            $this->syncStructure($client, $account, $this->workspaceId, includeCreative: false);
+            $account->update(['last_structure_synced_at' => now()]);
+        }
 
-        return $this->upsertInsights($campaignInsights, 'campaign', $account, $fxRates)
-             + $this->upsertInsights($adInsights, 'ad', $account, $fxRates);
+        // Campaign-level: powers the Campaigns page (queries level='campaign').
+        // Ad-level: powers Winners/Losers and ad-level breakdowns.
+        // Both are needed — the schema constraint (ad_insights_level_fk_check) means
+        // campaign_id IS NULL on ad rows, so you can't derive campaign totals from ad rows.
+        // filterZeroImpressions reduces pagination on accounts with many inactive ads.
+        $campaignInsights = $client->fetchInsights(
+            $account->external_id, 'campaign', $since, $until,
+            filterZeroImpressions: true,
+        );
+
+        $adsetInsights = $client->fetchInsights(
+            $account->external_id, 'adset', $since, $until,
+            filterZeroImpressions: true,
+        );
+
+        $adInsights = $client->fetchInsights(
+            $account->external_id, 'ad', $since, $until,
+            filterZeroImpressions: true,
+        );
+
+        $count  = $this->upsertInsights($campaignInsights, 'campaign', $account, $fxRates);
+        $count += $this->upsertInsights($adsetInsights, 'adset', $account, $fxRates);
+        $count += $this->upsertInsights($adInsights, 'ad', $account, $fxRates);
+
+        return $count;
     }
 
     /**
@@ -184,368 +264,6 @@ class SyncAdInsightsJob implements ShouldQueue
         return $this->upsertGoogleInsights($rows, $account, $fxRates);
     }
 
-    // -------------------------------------------------------------------------
-    // Structure sync — campaigns, adsets, ads
-    // -------------------------------------------------------------------------
-
-    private function syncStructure(FacebookAdsClient $client, AdAccount $account, int $workspaceId): void
-    {
-        // Campaigns
-        $campaigns = $client->fetchCampaigns($account->external_id);
-
-        foreach ($campaigns as $row) {
-            Campaign::withoutGlobalScopes()->updateOrCreate(
-                ['ad_account_id' => $account->id, 'external_id' => (string) $row['id']],
-                [
-                    'workspace_id' => $workspaceId,
-                    'name'         => (string) ($row['name'] ?? ''),
-                    'status'       => (string) ($row['effective_status'] ?? ''),
-                    'objective'    => isset($row['objective']) ? (string) $row['objective'] : null,
-                ]
-            );
-        }
-
-        // Adsets — keyed by external campaign_id so we can resolve the internal campaign FK
-        $adsets = $client->fetchAdsets($account->external_id);
-
-        // Build campaign external→internal map for this account
-        $campaignMap = Campaign::withoutGlobalScopes()
-            ->where('ad_account_id', $account->id)
-            ->pluck('id', 'external_id');
-
-        foreach ($adsets as $row) {
-            $campaignId = $campaignMap[(string) $row['campaign_id']] ?? null;
-
-            if ($campaignId === null) {
-                continue;
-            }
-
-            Adset::withoutGlobalScopes()->updateOrCreate(
-                ['campaign_id' => $campaignId, 'external_id' => (string) $row['id']],
-                [
-                    'workspace_id' => $workspaceId,
-                    'name'         => (string) ($row['name'] ?? ''),
-                    'status'       => (string) ($row['effective_status'] ?? ''),
-                ]
-            );
-        }
-
-        // Ads — keyed by external adset_id
-        $ads = $client->fetchAds($account->external_id);
-
-        // Build adset external→internal map for all adsets in this account
-        $adsetMap = Adset::withoutGlobalScopes()
-            ->whereIn('campaign_id', $campaignMap->values())
-            ->pluck('id', 'external_id');
-
-        foreach ($ads as $row) {
-            $adsetId = $adsetMap[(string) $row['adset_id']] ?? null;
-
-            if ($adsetId === null) {
-                continue;
-            }
-
-            $destinationUrl = $row['creative']['object_url'] ?? null;
-
-            Ad::withoutGlobalScopes()->updateOrCreate(
-                ['adset_id' => $adsetId, 'external_id' => (string) $row['id']],
-                [
-                    'workspace_id'    => $workspaceId,
-                    'name'            => isset($row['name']) ? (string) $row['name'] : null,
-                    'status'          => (string) ($row['effective_status'] ?? ''),
-                    'destination_url' => $destinationUrl !== null ? (string) $destinationUrl : null,
-                ]
-            );
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // Google — structure sync
-    // -------------------------------------------------------------------------
-
-    /**
-     * Upsert campaigns returned from Google Ads GAQL into the campaigns table.
-     * Google Ads has no adsets or ads at this tier (campaign-level only per spec).
-     */
-    private function syncGoogleCampaigns(
-        GoogleAdsClient $client,
-        AdAccount $account,
-        string $customerId,
-    ): void {
-        $rows = $client->fetchCampaigns($customerId);
-
-        foreach ($rows as $row) {
-            $campaign = $row['campaign'] ?? [];
-            $external = (string) ($campaign['id'] ?? '');
-
-            if ($external === '') {
-                continue;
-            }
-
-            Campaign::withoutGlobalScopes()->updateOrCreate(
-                ['ad_account_id' => $account->id, 'external_id' => $external],
-                [
-                    'workspace_id' => $this->workspaceId,
-                    'name'         => (string) ($campaign['name'] ?? ''),
-                    'status'       => (string) ($campaign['status'] ?? ''),
-                    'objective'    => isset($campaign['advertisingChannelType'])
-                        ? (string) $campaign['advertisingChannelType']
-                        : null,
-                ]
-            );
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // Google — insight upsert
-    // -------------------------------------------------------------------------
-
-    /**
-     * Map Google Ads GAQL insight rows to ad_insights and upsert.
-     *
-     * Per spec:
-     *   - campaign level only
-     *   - hour is always NULL (Google has no hourly data)
-     *   - reach and platform_roas are always NULL
-     *   - spend = metrics.cost_micros ÷ 1,000,000
-     *   - cpc  = metrics.average_cpc  ÷ 1,000,000
-     *
-     * @param  list<array<string, mixed>> $rows
-     */
-    private function upsertGoogleInsights(
-        array $rows,
-        AdAccount $account,
-        FxRateService $fxRates,
-    ): int {
-        if (empty($rows)) {
-            return 0;
-        }
-
-        $workspace         = Workspace::withoutGlobalScopes()->find($this->workspaceId);
-        $reportingCurrency = $workspace?->reporting_currency ?? 'EUR';
-
-        $campaignMap = Campaign::withoutGlobalScopes()
-            ->where('ad_account_id', $account->id)
-            ->pluck('id', 'external_id');
-
-        $count = 0;
-
-        foreach ($rows as $row) {
-            $campaign = $row['campaign'] ?? [];
-            $metrics  = $row['metrics'] ?? [];
-            $segments = $row['segments'] ?? [];
-
-            $externalCampaignId = (string) ($campaign['id'] ?? '');
-            $dateStr            = (string) ($segments['date'] ?? '');
-
-            if ($externalCampaignId === '' || $dateStr === '') {
-                continue;
-            }
-
-            $campaignId = $campaignMap[$externalCampaignId] ?? null;
-
-            if ($campaignId === null) {
-                continue;
-            }
-
-            $date    = Carbon::parse($dateStr);
-            $spend   = (float) ($metrics['costMicros'] ?? 0) / 1_000_000;
-            $currency = $account->currency;
-
-            $spendConverted = null;
-            try {
-                $spendConverted = $fxRates->convert($spend, $currency, $reportingCurrency, $date);
-            } catch (\App\Exceptions\FxRateNotFoundException $e) {
-                Log::warning('SyncAdInsightsJob (Google): FX rate not found, leaving spend_in_reporting_currency NULL', [
-                    'currency'    => $currency,
-                    'date'        => $dateStr,
-                    'ad_account'  => $account->id,
-                ]);
-            }
-
-            $ctr = isset($metrics['ctr']) ? (float) $metrics['ctr'] : null;
-            // average_cpc comes in micros
-            $cpc = isset($metrics['averageCpc'])
-                ? (float) $metrics['averageCpc'] / 1_000_000
-                : null;
-
-            AdInsight::withoutGlobalScopes()->updateOrCreate(
-                [
-                    'level'       => 'campaign',
-                    'campaign_id' => $campaignId,
-                    'date'        => $dateStr,
-                    'hour'        => null,
-                ],
-                [
-                    'workspace_id'                => $this->workspaceId,
-                    'ad_account_id'               => $account->id,
-                    'adset_id'                    => null,
-                    'ad_id'                       => null,
-                    'spend'                       => $spend,
-                    'spend_in_reporting_currency' => $spendConverted,
-                    'impressions'                 => (int) ($metrics['impressions'] ?? 0),
-                    'clicks'                      => (int) ($metrics['clicks'] ?? 0),
-                    'reach'                       => null,  // not available in Google Ads
-                    'ctr'                         => $ctr,
-                    'cpc'                         => $cpc,
-                    'platform_roas'               => null,  // not available in Google Ads
-                    'currency'                    => $currency,
-                ]
-            );
-
-            $count++;
-        }
-
-        return $count;
-    }
-
-    // -------------------------------------------------------------------------
-    // Insight upsert
-    // -------------------------------------------------------------------------
-
-    /**
-     * Upsert a batch of insight rows and return the count processed.
-     *
-     * Facebook insight rows never have an hour value (daily only at this level).
-     * Partial indexes on ad_insights require per-row updateOrCreate rather than
-     * bulk upsert(), since Laravel's upsert() cannot target PostgreSQL partial indexes.
-     *
-     * spend_in_reporting_currency is computed here using FxRateService (DB-first).
-     * If an FX rate is unavailable, the field is left NULL and RetryMissingConversionJob
-     * will back-fill it nightly.
-     *
-     * @param  array<int, array<string, mixed>> $rows
-     * @param  string  $level  'campaign' or 'ad'
-     * @return int  Number of rows processed
-     */
-    private function upsertInsights(
-        array $rows,
-        string $level,
-        AdAccount $account,
-        FxRateService $fxRates,
-    ): int {
-        if (empty($rows)) {
-            return 0;
-        }
-
-        $workspace         = Workspace::withoutGlobalScopes()->find($this->workspaceId);
-        $reportingCurrency = $workspace?->reporting_currency ?? 'EUR';
-
-        // Build structure maps for FK resolution
-        $campaignMap = Campaign::withoutGlobalScopes()
-            ->where('ad_account_id', $account->id)
-            ->pluck('id', 'external_id');
-
-        $adsetMap = Adset::withoutGlobalScopes()
-            ->whereIn('campaign_id', $campaignMap->values())
-            ->pluck('id', 'external_id');
-
-        $adMap = Ad::withoutGlobalScopes()
-            ->whereIn('adset_id', $adsetMap->values())
-            ->pluck('id', 'external_id');
-
-        $count = 0;
-
-        foreach ($rows as $row) {
-            $date    = Carbon::parse((string) $row['date_start']);
-            $spend   = (float) ($row['spend'] ?? 0);
-            $currency = strtoupper((string) ($row['account_currency'] ?? $account->currency));
-
-            // FX conversion (DB-first; NULL on missing rate)
-            $spendConverted = null;
-            try {
-                $spendConverted = $fxRates->convert($spend, $currency, $reportingCurrency, $date);
-            } catch (\App\Exceptions\FxRateNotFoundException $e) {
-                Log::warning('SyncAdInsightsJob: FX rate not found, leaving spend_in_reporting_currency NULL', [
-                    'currency'    => $currency,
-                    'date'        => $date->toDateString(),
-                    'ad_account'  => $account->id,
-                ]);
-            }
-
-            // Resolve FKs
-            $campaignId = isset($row['campaign_id'])
-                ? ($campaignMap[(string) $row['campaign_id']] ?? null)
-                : null;
-
-            $adsetId = isset($row['adset_id'])
-                ? ($adsetMap[(string) $row['adset_id']] ?? null)
-                : null;
-
-            $adId = isset($row['ad_id'])
-                ? ($adMap[(string) $row['ad_id']] ?? null)
-                : null;
-
-            // Build the unique-key conditions that match the partial index
-            $uniqueKeys = match ($level) {
-                'campaign' => [
-                    'level'       => 'campaign',
-                    'campaign_id' => $campaignId,
-                    'date'        => $date->toDateString(),
-                    'hour'        => null,
-                ],
-                'ad' => [
-                    'level'  => 'ad',
-                    'ad_id'  => $adId,
-                    'date'   => $date->toDateString(),
-                    'hour'   => null,
-                ],
-                default => [],
-            };
-
-            if (empty($uniqueKeys) || ($level === 'campaign' && $campaignId === null)) {
-                continue;
-            }
-
-            if ($level === 'ad' && $adId === null) {
-                continue;
-            }
-
-            AdInsight::withoutGlobalScopes()->updateOrCreate(
-                $uniqueKeys,
-                [
-                    'workspace_id'                => $this->workspaceId,
-                    'ad_account_id'               => $account->id,
-                    'campaign_id'                 => $campaignId,
-                    'adset_id'                    => $adsetId,
-                    'ad_id'                       => $adId,
-                    'spend'                       => $spend,
-                    'spend_in_reporting_currency' => $spendConverted,
-                    'impressions'                 => (int) ($row['impressions'] ?? 0),
-                    'clicks'                      => (int) ($row['clicks'] ?? 0),
-                    'reach'                       => isset($row['reach']) ? (int) $row['reach'] : null,
-                    'ctr'                         => isset($row['ctr']) ? (float) $row['ctr'] : null,
-                    'cpc'                         => isset($row['cpc']) ? (float) $row['cpc'] : null,
-                    'platform_roas'               => $this->extractRoas($row),
-                    'currency'                    => $currency,
-                ]
-            );
-
-            $count++;
-        }
-
-        return $count;
-    }
-
-    /**
-     * Extract the purchase_roas value from the insight row.
-     *
-     * Facebook returns purchase_roas as an array: [{"action_type":"omni_purchase","value":"3.14"}]
-     */
-    private function extractRoas(array $row): ?float
-    {
-        if (! isset($row['purchase_roas']) || ! is_array($row['purchase_roas'])) {
-            return null;
-        }
-
-        foreach ($row['purchase_roas'] as $entry) {
-            if (isset($entry['value'])) {
-                return (float) $entry['value'];
-            }
-        }
-
-        return null;
-    }
 
     // -------------------------------------------------------------------------
     // Failure handling
@@ -584,15 +302,16 @@ class SyncAdInsightsJob implements ShouldQueue
             return;
         }
 
-        // Close ALL running sync logs for this ad account — not just the most recent.
+        // Close ALL running sync logs for this job type — not just the most recent.
         // When MaxAttemptsExceededException fires before handle() can run, no new sync log
         // is created for that phantom attempt, so only previously-opened logs need closing.
-        // Using withoutGlobalScopes() to be safe: WorkspaceContext is set above, but
-        // the scope's WHERE would be redundant given the explicit workspace_id filter.
+        // Why job_type filter: without it, AdHistoricalImportJob's running log for the same
+        // ad account would be clobbered with this job's error message.
         SyncLog::withoutGlobalScopes()
             ->where('syncable_type', AdAccount::class)
             ->where('syncable_id', $this->adAccountId)
             ->where('workspace_id', $this->workspaceId)
+            ->where('job_type', self::class)
             ->where('status', 'running')
             ->update([
                 'status'        => 'failed',
@@ -700,5 +419,21 @@ class SyncAdInsightsJob implements ShouldQueue
             'attempt'       => $this->attempts(),
             'error'         => $e->getMessage(),
         ]);
+    }
+
+    /**
+     * Returns true if the workspace's trial has expired and no paid plan is active.
+     * Used to discard jobs that were queued before trial expiry.
+     */
+    private function isWorkspaceFrozen(): bool
+    {
+        $workspace = Workspace::withoutGlobalScopes()
+            ->select(['id', 'trial_ends_at', 'billing_plan'])
+            ->find($this->workspaceId);
+
+        return $workspace !== null
+            && $workspace->trial_ends_at !== null
+            && $workspace->trial_ends_at->lt(now())
+            && $workspace->billing_plan === null;
     }
 }

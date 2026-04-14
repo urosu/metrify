@@ -1,17 +1,15 @@
-import DangerButton from '@/Components/DangerButton';
-import InputError from '@/Components/InputError';
-import InputLabel from '@/Components/InputLabel';
-import Modal from '@/Components/Modal';
-import SecondaryButton from '@/Components/SecondaryButton';
-import TextInput from '@/Components/TextInput';
+import { Button } from '@/Components/ui/button';
+import {
+    Dialog,
+    DialogContent,
+    DialogTitle,
+} from '@/Components/ui/dialog';
+import { Input } from '@/Components/ui/input';
+import { Label } from '@/Components/ui/label';
 import { useForm } from '@inertiajs/react';
 import { FormEventHandler, useRef, useState } from 'react';
 
-export default function DeleteUserForm({
-    className = '',
-}: {
-    className?: string;
-}) {
+export default function DeleteUserForm() {
     const [confirmingUserDeletion, setConfirmingUserDeletion] = useState(false);
     const passwordInput = useRef<HTMLInputElement>(null);
 
@@ -44,81 +42,61 @@ export default function DeleteUserForm({
 
     const closeModal = () => {
         setConfirmingUserDeletion(false);
-
         clearErrors();
         reset();
     };
 
     return (
-        <section className={`space-y-6 ${className}`}>
+        <section className="space-y-6">
             <header>
-                <h2 className="text-lg font-medium text-gray-900">
+                <h2 className="text-lg font-medium text-zinc-900">
                     Delete Account
                 </h2>
-
-                <p className="mt-1 text-sm text-gray-600">
+                <p className="mt-1 text-sm text-zinc-600">
                     Once your account is deleted, all of its resources and data
                     will be permanently deleted. Before deleting your account,
-                    please download any data or information that you wish to
-                    retain.
+                    please download any data or information that you wish to retain.
                 </p>
             </header>
 
-            <DangerButton onClick={confirmUserDeletion}>
+            <Button variant="destructive" onClick={confirmUserDeletion}>
                 Delete Account
-            </DangerButton>
+            </Button>
 
-            <Modal show={confirmingUserDeletion} onClose={closeModal}>
-                <form onSubmit={deleteUser} className="p-6">
-                    <h2 className="text-lg font-medium text-gray-900">
-                        Are you sure you want to delete your account?
-                    </h2>
-
-                    <p className="mt-1 text-sm text-gray-600">
-                        Once your account is deleted, all of its resources and
-                        data will be permanently deleted. Please enter your
-                        password to confirm you would like to permanently delete
-                        your account.
+            <Dialog open={confirmingUserDeletion} onOpenChange={(open) => { if (!open) closeModal(); }}>
+                <DialogContent>
+                    <DialogTitle>Delete account?</DialogTitle>
+                    <p className="text-sm text-zinc-600">
+                        Once your account is deleted, all of its resources and data will be
+                        permanently deleted. Please enter your password to confirm.
                     </p>
 
-                    <div className="mt-6">
-                        <InputLabel
-                            htmlFor="password"
-                            value="Password"
-                            className="sr-only"
-                        />
+                    <form onSubmit={deleteUser} className="mt-4 space-y-4">
+                        <div>
+                            <Label htmlFor="delete-password" className="sr-only">Password</Label>
+                            <Input
+                                id="delete-password"
+                                type="password"
+                                ref={passwordInput}
+                                value={data.password}
+                                onChange={(e) => setData('password', e.target.value)}
+                                placeholder="Password"
+                                autoFocus
+                            />
+                            {errors.password && <p className="mt-2 text-sm text-red-600">{errors.password}</p>}
+                        </div>
 
-                        <TextInput
-                            id="password"
-                            type="password"
-                            name="password"
-                            ref={passwordInput}
-                            value={data.password}
-                            onChange={(e) =>
-                                setData('password', e.target.value)
-                            }
-                            className="mt-1 block w-3/4"
-                            isFocused
-                            placeholder="Password"
-                        />
-
-                        <InputError
-                            message={errors.password}
-                            className="mt-2"
-                        />
-                    </div>
-
-                    <div className="mt-6 flex justify-end">
-                        <SecondaryButton onClick={closeModal}>
-                            Cancel
-                        </SecondaryButton>
-
-                        <DangerButton className="ms-3" disabled={processing}>
-                            Delete Account
-                        </DangerButton>
-                    </div>
-                </form>
-            </Modal>
+                        <div className="flex justify-end gap-3">
+                            <Button type="button" variant="outline" onClick={closeModal}>
+                                Cancel
+                            </Button>
+                            <Button type="submit" variant="destructive" disabled={processing}>
+                                Delete Account
+                            </Button>
+                        </div>
+                    </form>
+                </DialogContent>
+            </Dialog>
         </section>
     );
 }

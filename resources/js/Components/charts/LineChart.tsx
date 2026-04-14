@@ -47,8 +47,8 @@ function formatYAxis(
 }
 
 const COLORS = {
-    primary: '#4f46e5',  // indigo-600
-    compare: '#4f46e5',  // same — dash pattern differentiates
+    primary: 'var(--chart-1)',  // indigo — primary series
+    compare: 'var(--chart-5)',  // violet — comparison series (dash pattern also differentiates)
 };
 
 interface NoteMarkerProps {
@@ -113,7 +113,7 @@ const LineChartWrapper = React.memo(function LineChartWrapper({
                     {hoveredNote.note}
                 </div>
             )}
-            <ResponsiveContainer width="100%" height="100%">
+            <ResponsiveContainer width="100%" height="100%" minWidth={0} initialDimension={{ width: 0, height: 1 }}>
                 <RechartsLineChart
                     data={merged}
                     margin={{ top: 4, right: 8, left: 0, bottom: 0 }}

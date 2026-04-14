@@ -10,6 +10,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasManyThrough;
 
 #[ScopedBy([WorkspaceScope::class])]
 class AdAccount extends Model
@@ -34,6 +35,7 @@ class AdAccount extends Model
         'historical_import_started_at',
         'historical_import_completed_at',
         'historical_import_duration_seconds',
+        'last_structure_synced_at',
     ];
 
     protected $hidden = [
@@ -50,6 +52,7 @@ class AdAccount extends Model
             'historical_import_checkpoint'   => 'array',
             'historical_import_started_at'   => 'datetime',
             'historical_import_completed_at' => 'datetime',
+            'last_structure_synced_at'       => 'datetime',
         ];
     }
 
@@ -66,5 +69,14 @@ class AdAccount extends Model
     public function adInsights(): HasMany
     {
         return $this->hasMany(AdInsight::class);
+    }
+
+    /**
+     * All adsets for this account, reached via campaign FK.
+     * Use hasManyThrough for direct joins without loading campaigns first.
+     */
+    public function adsets(): HasManyThrough
+    {
+        return $this->hasManyThrough(Adset::class, Campaign::class);
     }
 }

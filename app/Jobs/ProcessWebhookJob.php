@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Jobs;
 
 use App\Actions\UpsertWooCommerceOrderAction;
+use App\Actions\UpsertWooCommerceProductAction;
 use App\Models\Order;
 use App\Models\Store;
 use App\Models\WebhookLog;
@@ -28,7 +29,7 @@ use Illuminate\Support\Facades\Log;
  *
  * Flow:
  *   1. Set WorkspaceContext so workspace-scoped models resolve correctly.
- *   2. Deduplication: skip if an identical event+order_id was processed within 24 h.
+ *   2. Deduplication: skip if an identical event+entity_id was processed within 24 h.
  *   3. Dispatch to the appropriate handler (upsert or soft-delete).
  *   4. Mark WebhookLog as 'processed' or 'failed'.
  *
@@ -56,19 +57,19 @@ class ProcessWebhookJob implements ShouldQueue
         $this->onQueue('critical');
     }
 
-    public function handle(UpsertWooCommerceOrderAction $action): void
+    public function handle(UpsertWooCommerceOrderAction $orderAction, UpsertWooCommerceProductAction $productAction): void
     {
         app(WorkspaceContext::class)->set($this->workspaceId);
 
-        $externalOrderId = (string) ($this->payload['id'] ?? '');
+        $externalEntityId = (string) ($this->payload['id'] ?? '');
 
         // --- Deduplication ---------------------------------------------------
-        if ($externalOrderId !== '' && $this->isDuplicate($externalOrderId)) {
+        if ($externalEntityId !== '' && $this->isDuplicate($externalEntityId)) {
             Log::info('ProcessWebhookJob: duplicate delivery skipped', [
-                'store_id'   => $this->storeId,
-                'event'      => $this->event,
-                'order_id'   => $externalOrderId,
-                'log_id'     => $this->webhookLogId,
+                'store_id'  => $this->storeId,
+                'event'     => $this->event,
+                'entity_id' => $externalEntityId,
+                'log_id'    => $this->webhookLogId,
             ]);
             $this->markLog('processed', null);
             return;
@@ -87,12 +88,13 @@ class ProcessWebhookJob implements ShouldQueue
         try {
             match ($this->event) {
                 'order.created',
-                'order.updated' => $action->handle(
+                'order.updated' => $orderAction->handle(
                     $store,
                     $store->workspace->reporting_currency,
                     $this->payload,
                 ),
-                'order.deleted' => $this->handleOrderDeleted($externalOrderId),
+                'order.deleted'   => $this->handleOrderDeleted($externalEntityId),
+                'product.updated' => $productAction->handle($store, $this->payload),
             };
 
             Store::withoutGlobalScopes()
@@ -102,11 +104,11 @@ class ProcessWebhookJob implements ShouldQueue
             $this->markLog('processed', null);
         } catch (\Throwable $e) {
             Log::error('ProcessWebhookJob: processing failed', [
-                'store_id'   => $this->storeId,
-                'event'      => $this->event,
-                'order_id'   => $externalOrderId,
-                'log_id'     => $this->webhookLogId,
-                'error'      => $e->getMessage(),
+                'store_id'  => $this->storeId,
+                'event'     => $this->event,
+                'entity_id' => $externalEntityId,
+                'log_id'    => $this->webhookLogId,
+                'error'     => $e->getMessage(),
             ]);
 
             $this->markLog('failed', mb_substr($e->getMessage(), 0, 500));
@@ -120,14 +122,14 @@ class ProcessWebhookJob implements ShouldQueue
     // -------------------------------------------------------------------------
 
     /**
-     * Check if this event+order_id combination was already successfully processed
+     * Check if this event+entity_id combination was already successfully processed
      * within the last 24 hours (per spec deduplication window).
      */
-    private function isDuplicate(string $externalOrderId): bool
+    private function isDuplicate(string $externalEntityId): bool
     {
         return WebhookLog::where('store_id', $this->storeId)
             ->where('event', $this->event)
-            ->whereRaw("payload->>'id' = ?", [$externalOrderId])
+            ->whereRaw("payload->>'id' = ?", [$externalEntityId])
             ->where('status', 'processed')
             ->where('created_at', '>=', now()->subHours(24))
             ->exists();
@@ -136,15 +138,15 @@ class ProcessWebhookJob implements ShouldQueue
     /**
      * Handle order.deleted: soft-cancel the order row, never hard-delete.
      */
-    private function handleOrderDeleted(string $externalOrderId): void
+    private function handleOrderDeleted(string $externalEntityId): void
     {
-        if ($externalOrderId === '') {
+        if ($externalEntityId === '') {
             return;
         }
 
         // WorkspaceContext is set, so the scope filters to the correct workspace.
         Order::where('store_id', $this->storeId)
-            ->where('external_id', $externalOrderId)
+            ->where('external_id', $externalEntityId)
             ->update([
                 'status'     => 'cancelled',
                 'updated_at' => now()->toDateTimeString(),

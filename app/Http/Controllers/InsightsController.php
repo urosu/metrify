@@ -7,6 +7,7 @@ namespace App\Http\Controllers;
 use App\Models\AdAccount;
 use App\Models\AiSummary;
 use App\Models\Alert;
+use App\Models\DailyNote;
 use App\Models\Store;
 use App\Services\WorkspaceContext;
 use Illuminate\Http\RedirectResponse;
@@ -44,6 +45,21 @@ class InsightsController extends Controller
                 'generated_at' => $s->generated_at->toISOString(),
             ]);
 
+        // Daily notes — last 14 days, newest first
+        // Why: notes appear in the Insights feed alongside AI summaries so users
+        // have a unified view of what they recorded each day.
+        $dailyNotes = DailyNote::withoutGlobalScopes()
+            ->where('workspace_id', $workspaceId)
+            ->where('date', '>=', now()->subDays(13)->toDateString())
+            ->select(['id', 'date', 'note'])
+            ->orderByDesc('date')
+            ->get()
+            ->map(fn ($n) => [
+                'id'   => $n->id,
+                'date' => $n->date->toDateString(),
+                'note' => $n->note,
+            ]);
+
         // Alert query — scoped to workspace, with optional filters
         $query = Alert::withoutGlobalScopes()
             ->where('workspace_id', $workspaceId)
@@ -77,6 +93,7 @@ class InsightsController extends Controller
 
         return Inertia::render('Insights', [
             'ai_summaries' => $aiSummaries,
+            'daily_notes'  => $dailyNotes,
             'alerts'       => $alerts,
             'filters'      => [
                 'severity' => $severity,
@@ -85,21 +102,35 @@ class InsightsController extends Controller
         ]);
     }
 
-    public function markRead(Alert $alert): RedirectResponse
+    public function dismiss(int $alert): RedirectResponse
     {
-        // WorkspaceScope ensures alert belongs to active workspace
-        $alert->update(['read_at' => now()]);
+        // Why: avoid implicit route model binding which triggers WorkspaceScope before
+        // WorkspaceContext is guaranteed to be set. Manual lookup with workspace check.
+        $workspaceId = app(WorkspaceContext::class)->id();
+
+        Alert::withoutGlobalScopes()
+            ->where('id', $alert)
+            ->where('workspace_id', $workspaceId)
+            ->whereNull('resolved_at')
+            ->update([
+                'resolved_at' => now(),
+                'read_at'     => now(),
+            ]);
 
         return back();
     }
 
-    public function resolve(Alert $alert): RedirectResponse
+    public function dismissAll(): RedirectResponse
     {
-        // Mark as read too if not already
-        $alert->update([
-            'resolved_at' => now(),
-            'read_at'     => $alert->read_at ?? now(),
-        ]);
+        $workspaceId = app(WorkspaceContext::class)->id();
+
+        Alert::withoutGlobalScopes()
+            ->where('workspace_id', $workspaceId)
+            ->whereNull('resolved_at')
+            ->update([
+                'resolved_at' => now(),
+                'read_at'     => now(),
+            ]);
 
         return back();
     }

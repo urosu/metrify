@@ -80,7 +80,7 @@ export default function StoreCountries({ store, countries }: Props) {
                                                 <div className="flex items-center gap-2">
                                                     <div className="w-24 h-1.5 rounded-full bg-zinc-100 overflow-hidden">
                                                         <div
-                                                            className="h-full bg-indigo-500 rounded-full"
+                                                            className="h-full bg-primary/70 rounded-full"
                                                             style={{ width: `${Math.min(row.share, 100)}%` }}
                                                         />
                                                     </div>

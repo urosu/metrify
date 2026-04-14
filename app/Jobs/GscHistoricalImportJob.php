@@ -37,6 +37,7 @@ use Throwable;
  *    PER DAY — querying a multi-day range returns the top-1,000 across the entire
  *    range, not per day.
  *  - 3 API calls per day: queryDailyStats, querySearchQueries, queryPages.
+ *  - Imports newest → oldest so recent data is usable early if rate-limited.
  *  - Checkpoint (historical_import_checkpoint) records the last completed date
  *    so retries resume without re-fetching already-imported days.
  *  - Progress (0–99) is written after each day. 100 is written only on completion.
@@ -62,6 +63,7 @@ class GscHistoricalImportJob implements ShouldQueue
     public function __construct(
         private readonly int $propertyId,
         private readonly int $workspaceId,
+        private ?int         $syncLogId = null,
     ) {
         $this->onQueue('low');
     }
@@ -88,11 +90,7 @@ class GscHistoricalImportJob implements ShouldQueue
         if ($workspace !== null && $this->isBillingExpired($workspace)) {
             $property->update(['historical_import_status' => 'failed']);
 
-            SyncLog::create([
-                'workspace_id'      => $this->workspaceId,
-                'syncable_type'     => SearchConsoleProperty::class,
-                'syncable_id'       => $this->propertyId,
-                'job_type'          => self::class,
+            $this->resolveSyncLog(SearchConsoleProperty::class, $this->propertyId, [
                 'status'            => 'failed',
                 'records_processed' => 0,
                 'error_message'     => 'Import paused — subscription required.',
@@ -109,11 +107,11 @@ class GscHistoricalImportJob implements ShouldQueue
             return;
         }
 
+        // When historical_import_from is null the user chose "All available data".
+        // Fall back to 2010-01-01 — GSC will cap its response at 16 months on its side.
         if ($property->historical_import_from === null) {
-            Log::error('GscHistoricalImportJob: historical_import_from is null, nothing to import', [
-                'property_id' => $this->propertyId,
-            ]);
-            return;
+            $property->update(['historical_import_from' => '2010-01-01']);
+            $property->refresh();
         }
 
         // Preserve the original start time across retries.
@@ -122,11 +120,7 @@ class GscHistoricalImportJob implements ShouldQueue
             'historical_import_started_at' => $property->historical_import_started_at ?? now(),
         ]);
 
-        $syncLog = SyncLog::create([
-            'workspace_id'      => $this->workspaceId,
-            'syncable_type'     => SearchConsoleProperty::class,
-            'syncable_id'       => $this->propertyId,
-            'job_type'          => self::class,
+        $syncLog = $this->resolveSyncLog(SearchConsoleProperty::class, $this->propertyId, [
             'status'            => 'running',
             'records_processed' => 0,
             'started_at'        => now(),
@@ -193,8 +187,11 @@ class GscHistoricalImportJob implements ShouldQueue
     // -------------------------------------------------------------------------
 
     /**
-     * Iterate day-by-day from historical_import_from through now()-3 days.
+     * Iterate day-by-day from now()-3 days back to historical_import_from.
      * Each day makes 3 API calls: daily_stats, queries, pages.
+     *
+     * Why newest → oldest: if a rate-limit or error interrupts the import,
+     * the most recent data (which the dashboard uses) is already in the DB.
      *
      * Writes checkpoint + progress after each day. Rate-limit exceptions re-queue
      * the job (attempt count unchanged) and return immediately.
@@ -216,15 +213,17 @@ class GscHistoricalImportJob implements ShouldQueue
 
         $client = SearchConsoleClient::forProperty($property);
 
-        // Resume from checkpoint when retrying after a failure or rate-limit release.
+        // Import newest → oldest. Checkpoint stores the last successfully processed day
+        // so retries resume from that day (reprocessing it once, which is safe — upserts).
         $checkpoint    = $property->historical_import_checkpoint;
         $dayCursor     = isset($checkpoint['date_cursor'])
             ? Carbon::parse($checkpoint['date_cursor'])->startOfDay()
-            : $importFrom->copy();
+            : $importTo->copy();
 
-        $completedDays = (int) $importFrom->diffInDays($dayCursor);
+        // completedDays = how many days from the end (importTo) we have already processed.
+        $completedDays = (int) $dayCursor->diffInDays($importTo);
 
-        while ($dayCursor->lte($importTo)) {
+        while ($dayCursor->gte($importFrom)) {
             $dateStr = $dayCursor->toDateString();
 
             try {
@@ -281,7 +280,7 @@ class GscHistoricalImportJob implements ShouldQueue
 
             $syncLog->update(['records_processed' => $totalImported]);
 
-            $dayCursor->addDay();
+            $dayCursor->subDay();
         }
 
         return $totalImported;
@@ -378,18 +377,21 @@ class GscHistoricalImportJob implements ShouldQueue
                 continue;
             }
 
-            if (strlen($page) > 2000) {
-                $page = substr($page, 0, 2000);
-            }
+            // Unique key uses page_hash (SHA-256) to avoid large B-tree index bloat.
+            // Historical import pages are aggregate rows — device='all', country='ZZ'.
+            $pageHash = hash('sha256', $page);
 
             GscPage::withoutGlobalScopes()->updateOrCreate(
                 [
                     'property_id' => $property->id,
                     'date'        => $date,
-                    'page'        => $page,
+                    'page_hash'   => $pageHash,
+                    'device'      => 'all',
+                    'country'     => 'ZZ',
                 ],
                 [
                     'workspace_id' => $this->workspaceId,
+                    'page'         => $page,
                     'clicks'       => (int) ($row['clicks'] ?? 0),
                     'impressions'  => (int) ($row['impressions'] ?? 0),
                     'ctr'          => isset($row['ctr']) ? (float) $row['ctr'] : null,
@@ -411,6 +413,36 @@ class GscHistoricalImportJob implements ShouldQueue
         return $workspace->trial_ends_at !== null
             && $workspace->trial_ends_at->lt(now())
             && $workspace->billing_plan === null;
+    }
+
+    /**
+     * Finds and updates the pre-created queued sync log, or creates a new one.
+     *
+     * Why: when the job is dispatched, a 'queued' sync log is created so the admin
+     * can see the import is waiting to be processed. Once the job runs, we update
+     * that log instead of creating a new one.
+     *
+     * @param array<string, mixed> $fields
+     */
+    private function resolveSyncLog(string $syncableType, int $syncableId, array $fields): SyncLog
+    {
+        if ($this->syncLogId !== null) {
+            $log = SyncLog::withoutGlobalScopes()->find($this->syncLogId);
+            if ($log !== null) {
+                $log->update(['attempt' => $this->attempts(), ...$fields]);
+                return $log;
+            }
+        }
+
+        return SyncLog::create([
+            'workspace_id'  => $this->workspaceId,
+            'syncable_type' => $syncableType,
+            'syncable_id'   => $syncableId,
+            'job_type'      => self::class,
+            'queue'         => 'low',
+            'attempt'       => $this->attempts(),
+            ...$fields,
+        ]);
     }
 
     /**

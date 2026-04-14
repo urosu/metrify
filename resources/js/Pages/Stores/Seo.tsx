@@ -6,6 +6,7 @@ import type { StoreData } from '@/Components/layouts/StoreLayout';
 import { DateRangePicker } from '@/Components/shared/DateRangePicker';
 import { LineChart } from '@/Components/charts/LineChart';
 import { formatNumber } from '@/lib/formatters';
+import { formatGscProperty } from '@/lib/gsc';
 import type { PageProps } from '@/types';
 
 interface GscProperty {
@@ -85,7 +86,7 @@ export default function StoreSeo({
                         </p>
                         <Link
                             href="/settings/integrations"
-                            className="mt-4 text-sm font-medium text-indigo-600 hover:text-indigo-700"
+                            className="mt-4 text-sm font-medium text-primary hover:text-primary/80"
                         >
                             Connect Search Console →
                         </Link>
@@ -110,9 +111,9 @@ export default function StoreSeo({
                                 href={property.property_url}
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                className="flex items-center gap-1 text-indigo-600 hover:text-indigo-700 break-all"
+                                className="flex items-center gap-1 text-primary hover:text-primary/80 break-all"
                             >
-                                {property.property_url}
+                                {formatGscProperty(property.property_url)}
                                 <ExternalLink className="h-3 w-3 shrink-0" />
                             </a>
                         </div>
@@ -248,7 +249,7 @@ export default function StoreSeo({
                                                         href={row.page}
                                                         target="_blank"
                                                         rel="noopener noreferrer"
-                                                        className="flex items-center gap-1 text-indigo-600 hover:text-indigo-700"
+                                                        className="flex items-center gap-1 text-primary hover:text-primary/80"
                                                     >
                                                         <span className="truncate">
                                                             {row.page.replace(/^https?:\/\//, '')}

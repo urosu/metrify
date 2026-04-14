@@ -12,6 +12,7 @@ use App\Models\GscPage;
 use App\Models\GscQuery;
 use App\Models\SearchConsoleProperty;
 use App\Models\SyncLog;
+use App\Models\Workspace;
 use App\Services\Integrations\SearchConsole\SearchConsoleClient;
 use App\Services\WorkspaceContext;
 use Illuminate\Bus\Queueable;
@@ -26,19 +27,28 @@ use Throwable;
 /**
  * Syncs GSC data for a single Search Console property.
  *
+ * Triggered by: schedule (every 6 hours per active property, routes/console.php)
+ *               + immediately after a new property is connected
+ * Reads from:   Google Search Console API v3
+ * Writes to:    gsc_daily_stats, gsc_queries, gsc_pages
+ *
  * Queue:   default
  * Timeout: 300 s
  * Tries:   3
- * Backoff: [60, 300, 900] s (default)
+ * Backoff: [60, 300, 900] s
  *
  * On every run queries the last 5 days (covers GSC's 2-3 day data lag).
- * Upserts:
- *   - gsc_daily_stats  (1 row per date)
- *   - gsc_queries      (top 1,000 per date)
- *   - gsc_pages        (top 1,000 per date)
  *
- * Dispatched every 6 hours per active property via schedule closure in console.php.
- * Also dispatched immediately after a new property is connected.
+ * Per-date, per-data-type this job makes TWO API calls:
+ *   1. Aggregate (no device/country) → upserted with device='all', country='ZZ'
+ *   2. Breakdown (device + country dimensions) → upserted with actual device/country values
+ *
+ * Why two calls instead of one breakdown-only call: aggregate rows are used by Phase 2 anomaly
+ * detection (gsc_clicks baseline). Breakdown rows are Phase 0 data capture for future analysis.
+ *
+ * Related: app/Services/Integrations/SearchConsole/SearchConsoleClient.php (API client)
+ * Related: app/Models/GscDailyStat.php, GscQuery.php, GscPage.php (models)
+ * See: PLANNING.md "Integration-specific rules" + "Data Capture Strategy"
  */
 class SyncSearchConsoleJob implements ShouldQueue
 {
@@ -61,6 +71,12 @@ class SyncSearchConsoleJob implements ShouldQueue
     {
         app(WorkspaceContext::class)->set($this->workspaceId);
 
+        // Discard jobs queued before trial expiry.
+        if ($this->isWorkspaceFrozen()) {
+            Log::info('SyncSearchConsoleJob: skipped — workspace trial expired', ['workspace_id' => $this->workspaceId]);
+            return;
+        }
+
         /** @var SearchConsoleProperty|null $property */
         $property = SearchConsoleProperty::withoutGlobalScopes()->find($this->propertyId);
 
@@ -82,12 +98,15 @@ class SyncSearchConsoleJob implements ShouldQueue
             'job_type'      => self::class,
             'status'        => 'running',
             'started_at'    => now(),
+            'queue'         => 'default',
+            'attempt'       => $this->attempts(),
         ]);
 
         try {
             $client = SearchConsoleClient::forProperty($property);
 
-            // Query last 5 days to cover the 2-3 day GSC data lag
+            // Query last 5 days to cover the 2-3 day GSC data lag.
+            // See: PLANNING.md "Integration-specific rules"
             $endDate   = now()->subDay()->toDateString();
             $startDate = now()->subDays(5)->toDateString();
 
@@ -95,17 +114,29 @@ class SyncSearchConsoleJob implements ShouldQueue
 
             $recordsProcessed = 0;
 
-            // 1. Daily aggregate stats (one row per date)
+            // 1. Daily aggregate stats (device='all', country='ZZ')
             $dailyRows = $client->queryDailyStats($propertyUrl, $startDate, $endDate);
             $recordsProcessed += $this->upsertDailyStats($dailyRows, $property);
 
-            // 2. Per-query breakdown
+            // 2. Daily stats by device + country (Phase 0 data capture)
+            $dailyBreakdownRows = $client->queryDailyStatsBreakdown($propertyUrl, $startDate, $endDate);
+            $recordsProcessed += $this->upsertDailyStats($dailyBreakdownRows, $property);
+
+            // 3. Per-query aggregate (device='all', country='ZZ')
             $queryRows = $client->querySearchQueries($propertyUrl, $startDate, $endDate);
             $recordsProcessed += $this->upsertQueries($queryRows, $property);
 
-            // 3. Per-page breakdown
+            // 4. Per-query by device + country (Phase 0 data capture)
+            $queryBreakdownRows = $client->querySearchQueriesBreakdown($propertyUrl, $startDate, $endDate);
+            $recordsProcessed += $this->upsertQueries($queryBreakdownRows, $property);
+
+            // 5. Per-page aggregate (device='all', country='ZZ')
             $pageRows = $client->queryPages($propertyUrl, $startDate, $endDate);
             $recordsProcessed += $this->upsertPages($pageRows, $property);
+
+            // 6. Per-page by device + country (Phase 0 data capture)
+            $pageBreakdownRows = $client->queryPagesBreakdown($propertyUrl, $startDate, $endDate);
+            $recordsProcessed += $this->upsertPages($pageBreakdownRows, $property);
 
             // Mark success
             $property->update([
@@ -139,7 +170,14 @@ class SyncSearchConsoleJob implements ShouldQueue
 
     /**
      * Upsert daily aggregate stats.
-     * One row per (property_id, date). UNIQUE(property_id, date).
+     *
+     * Unique key: (property_id, date, device, country).
+     * Rows from the aggregate API call carry no device/country → stored as 'all'/'ZZ'.
+     * Rows from breakdown calls carry actual device + country values.
+     *
+     * Why NOT NULL sentinels instead of NULL: PostgreSQL treats NULL as distinct in unique
+     * constraints, so nullable device/country would allow duplicate workspace-level rows.
+     * See: PLANNING.md "gsc_daily_stats"
      *
      * @param  list<array<string, mixed>> $rows
      */
@@ -154,10 +192,18 @@ class SyncSearchConsoleJob implements ShouldQueue
                 continue;
             }
 
+            // GSC returns device as 'MOBILE'/'DESKTOP'/'TABLET' (uppercase) — normalise to lowercase.
+            // Country comes as ISO 3166-1 alpha-3 lowercase (e.g., 'deu') — normalise to uppercase CHAR(3).
+            // Aggregate rows have no device/country key → fall back to sentinel values.
+            $device  = strtolower((string) ($row['device'] ?? '')) ?: 'all';
+            $country = strtoupper((string) ($row['country'] ?? '')) ?: 'ZZ';
+
             GscDailyStat::withoutGlobalScopes()->updateOrCreate(
                 [
                     'property_id' => $property->id,
                     'date'        => $date,
+                    'device'      => $device,
+                    'country'     => $country,
                 ],
                 [
                     'workspace_id' => $this->workspaceId,
@@ -176,7 +222,9 @@ class SyncSearchConsoleJob implements ShouldQueue
 
     /**
      * Upsert per-query stats (top 1,000 per date per property).
-     * UNIQUE(property_id, date, query).
+     *
+     * Unique key: (property_id, date, query, device, country).
+     * Same device/country sentinel logic as upsertDailyStats.
      *
      * @param  list<array<string, mixed>> $rows
      */
@@ -192,11 +240,16 @@ class SyncSearchConsoleJob implements ShouldQueue
                 continue;
             }
 
+            $device  = strtolower((string) ($row['device'] ?? '')) ?: 'all';
+            $country = strtoupper((string) ($row['country'] ?? '')) ?: 'ZZ';
+
             GscQuery::withoutGlobalScopes()->updateOrCreate(
                 [
                     'property_id' => $property->id,
                     'date'        => $date,
                     'query'       => $query,
+                    'device'      => $device,
+                    'country'     => $country,
                 ],
                 [
                     'workspace_id' => $this->workspaceId,
@@ -215,7 +268,11 @@ class SyncSearchConsoleJob implements ShouldQueue
 
     /**
      * Upsert per-page stats (top 1,000 per date per property).
-     * UNIQUE(property_id, date, page).
+     *
+     * Unique key: (property_id, date, page_hash, device, country).
+     * page_hash = SHA-256 of the full page URL stored as CHAR(64).
+     * Why page_hash: VARCHAR(2000) unique index caused massive B-tree index bloat.
+     * See: PLANNING.md "gsc_pages"
      *
      * @param  list<array<string, mixed>> $rows
      */
@@ -231,19 +288,21 @@ class SyncSearchConsoleJob implements ShouldQueue
                 continue;
             }
 
-            // Truncate URLs > 2000 chars (B-tree index limit on varchar(2000))
-            if (strlen($page) > 2000) {
-                $page = substr($page, 0, 2000);
-            }
+            $pageHash = hash('sha256', $page);
+            $device   = strtolower((string) ($row['device'] ?? '')) ?: 'all';
+            $country  = strtoupper((string) ($row['country'] ?? '')) ?: 'ZZ';
 
             GscPage::withoutGlobalScopes()->updateOrCreate(
                 [
                     'property_id' => $property->id,
                     'date'        => $date,
-                    'page'        => $page,
+                    'page_hash'   => $pageHash,
+                    'device'      => $device,
+                    'country'     => $country,
                 ],
                 [
                     'workspace_id' => $this->workspaceId,
+                    'page'         => $page,
                     'clicks'       => (int) ($row['clicks'] ?? 0),
                     'impressions'  => (int) ($row['impressions'] ?? 0),
                     'ctr'          => isset($row['ctr']) ? (float) $row['ctr'] : null,
@@ -373,5 +432,17 @@ class SyncSearchConsoleJob implements ShouldQueue
             'attempt'     => $this->attempts(),
             'error'       => $e->getMessage(),
         ]);
+    }
+
+    private function isWorkspaceFrozen(): bool
+    {
+        $workspace = Workspace::withoutGlobalScopes()
+            ->select(['id', 'trial_ends_at', 'billing_plan'])
+            ->find($this->workspaceId);
+
+        return $workspace !== null
+            && $workspace->trial_ends_at !== null
+            && $workspace->trial_ends_at->lt(now())
+            && $workspace->billing_plan === null;
     }
 }

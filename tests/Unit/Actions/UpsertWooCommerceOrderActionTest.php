@@ -206,6 +206,102 @@ class UpsertWooCommerceOrderActionTest extends TestCase
         $this->assertEqualsWithDelta(100.0, (float) $order->total_in_reporting_currency, 0.01);
     }
 
+    public function test_shipping_country_extracted_from_shipping_address(): void
+    {
+        $this->action->handle($this->store, 'EUR', $this->makeWcOrder([
+            'shipping' => ['country' => 'AT'],
+        ]));
+
+        $order = Order::withoutGlobalScopes()->where('store_id', $this->store->id)->first();
+        // CHAR(3) column pads shorter codes with spaces — trim for comparison
+        $this->assertSame('AT', trim($order->shipping_country));
+    }
+
+    public function test_shipping_country_null_when_missing(): void
+    {
+        // makeWcOrder has no 'shipping' key — should store null
+        $this->action->handle($this->store, 'EUR', $this->makeWcOrder());
+
+        $order = Order::withoutGlobalScopes()->where('store_id', $this->store->id)->first();
+        $this->assertNull($order->shipping_country);
+    }
+
+    public function test_customer_id_stored(): void
+    {
+        $this->action->handle($this->store, 'EUR', $this->makeWcOrder([
+            'customer_id' => 42,
+        ]));
+
+        $order = Order::withoutGlobalScopes()->where('store_id', $this->store->id)->first();
+        $this->assertSame('42', $order->customer_id);
+    }
+
+    public function test_payment_method_stored(): void
+    {
+        $this->action->handle($this->store, 'EUR', $this->makeWcOrder([
+            'payment_method'       => 'stripe',
+            'payment_method_title' => 'Credit Card (Stripe)',
+        ]));
+
+        $order = Order::withoutGlobalScopes()->where('store_id', $this->store->id)->first();
+        $this->assertSame('stripe', $order->payment_method);
+        $this->assertSame('Credit Card (Stripe)', $order->payment_method_title);
+    }
+
+    public function test_utm_term_extracted_from_meta_data(): void
+    {
+        $this->action->handle($this->store, 'EUR', $this->makeWcOrder([
+            'meta_data' => [
+                ['key' => '_utm_term', 'value' => 'running shoes'],
+            ],
+        ]));
+
+        $order = Order::withoutGlobalScopes()->where('store_id', $this->store->id)->first();
+        $this->assertSame('running shoes', $order->utm_term);
+    }
+
+    public function test_coupons_inserted_into_order_coupons(): void
+    {
+        $this->action->handle($this->store, 'EUR', $this->makeWcOrder([
+            'coupon_lines' => [
+                ['code' => 'SUMMER20', 'discount' => '20.00'],
+                ['code' => 'FREESHIP', 'discount' => '5.00'],
+            ],
+        ]));
+
+        $order = Order::withoutGlobalScopes()->where('store_id', $this->store->id)->first();
+
+        $this->assertDatabaseHas('order_coupons', [
+            'order_id'        => $order->id,
+            'coupon_code'     => 'SUMMER20',
+            'discount_amount' => 20.00,
+            'discount_type'   => null,
+        ]);
+        $this->assertDatabaseHas('order_coupons', [
+            'order_id'        => $order->id,
+            'coupon_code'     => 'FREESHIP',
+            'discount_amount' => 5.00,
+        ]);
+    }
+
+    public function test_coupons_replaced_on_re_upsert(): void
+    {
+        $order = $this->makeWcOrder([
+            'coupon_lines' => [['code' => 'OLD10', 'discount' => '10.00']],
+        ]);
+
+        $this->action->handle($this->store, 'EUR', $order);
+        $this->assertDatabaseCount('order_coupons', 1);
+
+        // Re-upsert with different coupon
+        $order['coupon_lines'] = [['code' => 'NEW15', 'discount' => '15.00']];
+        $this->action->handle($this->store, 'EUR', $order);
+
+        $this->assertDatabaseCount('order_coupons', 1);
+        $this->assertDatabaseHas('order_coupons', ['coupon_code' => 'NEW15']);
+        $this->assertDatabaseMissing('order_coupons', ['coupon_code' => 'OLD10']);
+    }
+
     public function test_order_items_replaced_on_re_upsert(): void
     {
         $makeItems = fn (int $count) => array_map(fn ($i) => [

@@ -24,7 +24,7 @@ use Illuminate\Support\Facades\Log;
 /**
  * Imports the full order history for a WooCommerce store.
  *
- * Queue:   low
+ * Queue:   import
  * Timeout: 7200 s (2 hours)
  * Tries:   3
  * Backoff: default [60, 300, 900] s
@@ -49,8 +49,10 @@ use Illuminate\Support\Facades\Log;
  * Caller responsibility (controller/action before dispatching):
  *  - Set stores.historical_import_status = 'pending'
  *  - Set stores.historical_import_from = chosen start date
- *  - Fetch X-WP-Total via WooCommerceClient::fetchOrderCount() and store it
- *    in historical_import_total_orders (used for progress and time estimates)
+ *  - Optionally set historical_import_total_orders (used for progress %).
+ *    StartHistoricalImportAction does this via fetchOrderCount() on a best-effort
+ *    basis — if the count call fails, total_orders is null and progress stays
+ *    indeterminate rather than blocking the import.
  */
 class WooCommerceHistoricalImportJob implements ShouldQueue
 {
@@ -59,11 +61,19 @@ class WooCommerceHistoricalImportJob implements ShouldQueue
     public int $timeout = 7200;
     public int $tries   = 3;
 
+    /**
+     * Estimated wall-clock seconds to compute one snapshot date (4 DB aggregates).
+     * Used as a bootstrap value when we have no measured snapshot rate yet.
+     * Once the first date completes, dispatchSnapshotJobs() uses the real measured rate instead.
+     */
+    private const SNAPSHOT_SECS_PER_DATE = 0.05;
+
     public function __construct(
-        private readonly int $storeId,
-        private readonly int $workspaceId,
+        private readonly int  $storeId,
+        private readonly int  $workspaceId,
+        private ?int          $syncLogId = null,
     ) {
-        $this->onQueue('low');
+        $this->onQueue('import');
     }
 
     public function handle(UpsertWooCommerceOrderAction $action): void
@@ -84,11 +94,7 @@ class WooCommerceHistoricalImportJob implements ShouldQueue
         if ($workspace !== null && $this->isBillingExpired($workspace)) {
             $store->update(['historical_import_status' => 'failed']);
 
-            SyncLog::create([
-                'workspace_id'      => $this->workspaceId,
-                'syncable_type'     => Store::class,
-                'syncable_id'       => $this->storeId,
-                'job_type'          => self::class,
+            $this->resolveSyncLog(Store::class, $this->storeId, [
                 'status'            => 'failed',
                 'records_processed' => 0,
                 'error_message'     => 'Import paused — subscription required.',
@@ -105,14 +111,10 @@ class WooCommerceHistoricalImportJob implements ShouldQueue
             return; // Do not rethrow — no Horizon retry desired for billing blocks.
         }
 
-        $importFrom = $store->historical_import_from;
-
-        if ($importFrom === null) {
-            Log::error('WooCommerceHistoricalImportJob: historical_import_from is null, nothing to import', [
-                'store_id' => $this->storeId,
-            ]);
-            return;
-        }
+        // When historical_import_from is null the user chose "All available data".
+        // Fall back to 2010-01-01 — before WooCommerce existed — so the API returns
+        // its full history. The platform itself is the effective lower bound.
+        $importFrom = $store->historical_import_from ?? '2010-01-01';
 
         // Preserve the original start time across retries.
         $store->update([
@@ -120,21 +122,27 @@ class WooCommerceHistoricalImportJob implements ShouldQueue
             'historical_import_started_at' => $store->historical_import_started_at ?? now(),
         ]);
 
-        $syncLog = SyncLog::create([
-            'workspace_id'      => $this->workspaceId,
-            'syncable_type'     => Store::class,
-            'syncable_id'       => $this->storeId,
-            'job_type'          => self::class,
+        $syncLog = $this->resolveSyncLog(Store::class, $this->storeId, [
             'status'            => 'running',
             'records_processed' => 0,
             'started_at'        => now(),
         ]);
 
         try {
-            $totalImported = $this->runImport($store, $action, Carbon::parse($importFrom), $syncLog);
+            $importPhaseStart = microtime(true);
+            $totalImported    = $this->runImport($store, $action, Carbon::parse($importFrom), $syncLog, $importPhaseStart);
+            $importDuration   = microtime(true) - $importPhaseStart;
 
             // Reload to get the updated historical_import_started_at.
             $store->refresh();
+
+            // Compute daily_snapshots synchronously before marking the import complete.
+            // Why: the dashboard reads from daily_snapshots, not raw orders. If we mark
+            // status='completed' before snapshots exist, the user lands on an empty dashboard.
+            // Running them inline (dispatchSync) adds ~10–30 s for a 1-year import but ensures
+            // data is ready the moment the user is redirected. Jobs are idempotent — safe to
+            // re-run on retry. See: PLANNING.md "Job Dispatch Chain"
+            $this->dispatchSnapshotJobs(Carbon::parse($importFrom), $store, $importDuration);
 
             $store->update([
                 'historical_import_status'           => 'completed',
@@ -153,8 +161,6 @@ class WooCommerceHistoricalImportJob implements ShouldQueue
                 'completed_at'      => now(),
                 'duration_seconds'  => (int) max(0, (int) now()->diffInSeconds($syncLog->started_at)),
             ]);
-
-            $this->dispatchSnapshotJobs(Carbon::parse($importFrom));
 
             Log::info('WooCommerceHistoricalImportJob: completed', [
                 'store_id'       => $this->storeId,
@@ -197,8 +203,13 @@ class WooCommerceHistoricalImportJob implements ShouldQueue
     // -------------------------------------------------------------------------
 
     /**
-     * Iterate 30-day chunks from $importFrom through yesterday, paginating each
+     * Iterate 30-day chunks from yesterday back to $importFrom, paginating each
      * chunk until exhausted. Writes checkpoint + progress after every page.
+     *
+     * Why newest → oldest: if a rate-limit or error interrupts the import,
+     * the most recent orders (which the dashboard shows) are already in the DB.
+     * Checkpoint stores $chunkEnd so retries re-process the last chunk from its
+     * end boundary (idempotent — all writes are upserts).
      *
      * Rate-limit exceptions re-queue the job (attempt count unchanged) and return
      * without counting against $tries.
@@ -206,12 +217,14 @@ class WooCommerceHistoricalImportJob implements ShouldQueue
      * @return int Total orders upserted across all chunks.
      */
     private function runImport(
-        Store                      $store,
+        Store                        $store,
         UpsertWooCommerceOrderAction $action,
-        Carbon                     $importFrom,
-        SyncLog                    $syncLog,
+        Carbon                       $importFrom,
+        SyncLog                      $syncLog,
+        float                        $phaseStartedAt,
     ): int {
-        $importTo = Carbon::yesterday()->startOfDay();
+        $importTo   = Carbon::yesterday()->startOfDay();
+        $totalDates = max(1, (int) $importFrom->diffInDays($importTo) + 1);
 
         if ($importFrom->gt($importTo)) {
             return 0;
@@ -237,19 +250,21 @@ class WooCommerceHistoricalImportJob implements ShouldQueue
         $needsFx = $store->currency !== null && $store->currency !== $reportingCurrency;
 
         // Resume from checkpoint when retrying after a failure.
+        // Checkpoint stores the chunkEnd of the last processed chunk so the retry
+        // re-processes that chunk (safe — upserts) before continuing backward.
         $checkpoint = $store->historical_import_checkpoint;
-        $chunkStart = isset($checkpoint['date_cursor'])
+        $chunkEnd   = isset($checkpoint['date_cursor'])
             ? Carbon::parse($checkpoint['date_cursor'])->startOfDay()
-            : $importFrom->copy()->startOfDay();
+            : $importTo->copy();
 
         $totalOrders   = (int) ($store->historical_import_total_orders ?? 0);
         $totalImported = 0;
 
-        while ($chunkStart->lte($importTo)) {
-            $chunkEnd = $chunkStart->copy()->addDays(29);
+        while ($chunkEnd->gte($importFrom)) {
+            $chunkStart = $chunkEnd->copy()->subDays(29);
 
-            if ($chunkEnd->gt($importTo)) {
-                $chunkEnd = $importTo->copy();
+            if ($chunkStart->lt($importFrom)) {
+                $chunkStart = $importFrom->copy();
             }
 
             // Prefetch FX for this chunk only — avoids fetching decades of rates upfront
@@ -281,13 +296,35 @@ class WooCommerceHistoricalImportJob implements ShouldQueue
                     $totalImported++;
                 }
 
-                // Persist checkpoint and progress so retries resume from here.
+                // Adaptive import cap: estimate what fraction of total job time order import
+                // represents based on current measured throughput and expected snapshot cost.
+                //
+                // Why adaptive: at first we have no data, so we use a conservative estimate.
+                // As orders are processed the measured rate converges to reality, and the cap
+                // adjusts so the bar accurately reflects what fraction of time import will use.
+                //
+                // estimatedImportTotal: extrapolate current rate to full order count.
+                // estimatedSnapshotTotal: total_dates × SNAPSHOT_SECS_PER_DATE (bootstrap;
+                //   refined with real measurements once dispatchSnapshotJobs() starts).
+                $elapsed = microtime(true) - $phaseStartedAt;
+                if ($elapsed > 0 && $totalImported > 0) {
+                    $ordersPerSec          = $totalImported / $elapsed;
+                    $estimatedImportTotal  = $totalOrders > 0 ? ($totalOrders / $ordersPerSec) : $elapsed;
+                } else {
+                    // Bootstrap: no data yet, assume 60s total import (will self-correct quickly).
+                    $estimatedImportTotal = max(60.0, (float) ($totalOrders / 100));
+                }
+                $estimatedSnapshotTotal = $totalDates * self::SNAPSHOT_SECS_PER_DATE;
+                $importFrac = $estimatedImportTotal / max(0.001, $estimatedImportTotal + $estimatedSnapshotTotal);
+                $importFrac = max(0.50, min(0.92, $importFrac));
+                $importCap  = (int) round($importFrac * 99);
+
                 $progress = $totalOrders > 0
-                    ? (int) min(99, round(($totalImported / $totalOrders) * 100))
+                    ? (int) min($importCap, round(($totalImported / $totalOrders) * $importCap))
                     : null;
 
                 $store->update([
-                    'historical_import_checkpoint' => ['date_cursor' => $chunkStart->toDateString()],
+                    'historical_import_checkpoint' => ['date_cursor' => $chunkEnd->toDateString()],
                     'historical_import_progress'   => $progress,
                 ]);
 
@@ -296,24 +333,71 @@ class WooCommerceHistoricalImportJob implements ShouldQueue
                 $page++;
             } while ($page <= $totalPages && ! empty($orders));
 
-            $chunkStart->addDays(30);
+            $chunkEnd->subDays(30);
         }
 
         return $totalImported;
     }
 
     /**
-     * Dispatch one ComputeDailySnapshotJob per date from $importFrom through yesterday.
+     * Run ComputeDailySnapshotJob synchronously for every date in the imported range,
+     * advancing historical_import_progress from wherever import left off to 99.
+     *
+     * The split between import and snapshot phases is computed from actual measured
+     * durations — no hardcoded percentages:
+     *  - $importDuration: wall-clock seconds the order import phase took (passed in).
+     *  - snapshotRate: measured after the first date completes; extrapolated to total.
+     *  - importFrac: importDuration / (importDuration + estimatedSnapshotTotal).
+     *  - importBoundary: importFrac × 99 — where import ends on the 0-99 bar.
+     *
+     * Progress never goes backward (guarded by max($current, $new)).
+     * Writes are throttled — at most ~20 DB updates regardless of date range size.
+     *
+     * Why 99 not 100: 100 is written by the caller when status='completed' is set,
+     * keeping it as the unambiguous "fully done" signal for the frontend poller.
      *
      * Jobs are idempotent (INSERT … ON CONFLICT DO UPDATE) so re-dispatching is safe.
      */
-    private function dispatchSnapshotJobs(Carbon $importFrom): void
+    private function dispatchSnapshotJobs(Carbon $importFrom, Store $store, float $importDuration): void
     {
-        $cursor = $importFrom->copy()->startOfDay();
-        $end    = Carbon::yesterday()->startOfDay();
+        $cursor          = $importFrom->copy()->startOfDay();
+        $end             = Carbon::yesterday()->startOfDay();
+        $totalDates      = max(1, (int) $importFrom->diffInDays($end) + 1);
+        $done            = 0;
+        $phaseStart      = microtime(true);
+        $currentProgress = (int) ($store->historical_import_progress ?? 0);
+
+        // Throttle: write at most ~20 times during the snapshot phase.
+        $writeEvery = max(1, (int) ($totalDates / 20));
 
         while ($cursor->lte($end)) {
-            ComputeDailySnapshotJob::dispatch($this->storeId, $cursor->copy());
+            ComputeDailySnapshotJob::dispatchSync($this->storeId, $cursor->copy());
+            $done++;
+
+            $snapshotElapsed = microtime(true) - $phaseStart;
+            $snapshotRate    = $snapshotElapsed / $done; // measured seconds per date
+
+            // Use real measured snapshot rate to compute the split.
+            // Falls back to SNAPSHOT_SECS_PER_DATE only for the very first tick
+            // (before we have a real rate), which self-corrects on the next date.
+            $estimatedSnapshotTotal = $snapshotRate * $totalDates;
+            $totalEstimate          = $importDuration + $estimatedSnapshotTotal;
+            $importFrac             = $totalEstimate > 0
+                ? ($importDuration / $totalEstimate)
+                : 0.80;
+            $importFrac             = max(0.50, min(0.92, $importFrac));
+            $importBoundary         = (int) round($importFrac * 99);
+
+            $newProgress = max(
+                $currentProgress,
+                min(99, $importBoundary + (int) round(($done / $totalDates) * (99 - $importBoundary))),
+            );
+
+            if ($newProgress > $currentProgress && ($done % $writeEvery === 0 || $done === $totalDates)) {
+                $currentProgress = $newProgress;
+                $store->update(['historical_import_progress' => $newProgress]);
+            }
+
             $cursor->addDay();
         }
     }
@@ -333,5 +417,35 @@ class WooCommerceHistoricalImportJob implements ShouldQueue
         }
 
         return false;
+    }
+
+    /**
+     * Finds and updates the pre-created queued sync log, or creates a new one.
+     *
+     * Why: when the job is dispatched, a 'queued' sync log is created so the admin
+     * can see the import is waiting to be processed. Once the job runs, we update
+     * that log instead of creating a new one.
+     *
+     * @param array<string, mixed> $fields
+     */
+    private function resolveSyncLog(string $syncableType, int $syncableId, array $fields): SyncLog
+    {
+        if ($this->syncLogId !== null) {
+            $log = SyncLog::withoutGlobalScopes()->find($this->syncLogId);
+            if ($log !== null) {
+                $log->update(['attempt' => $this->attempts(), ...$fields]);
+                return $log;
+            }
+        }
+
+        return SyncLog::create([
+            'workspace_id'  => $this->workspaceId,
+            'syncable_type' => $syncableType,
+            'syncable_id'   => $syncableId,
+            'job_type'      => self::class,
+            'queue'         => 'import',
+            'attempt'       => $this->attempts(),
+            ...$fields,
+        ]);
     }
 }

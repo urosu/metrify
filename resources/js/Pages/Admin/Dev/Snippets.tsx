@@ -21,6 +21,7 @@ const DEV_COMMANDS = [
     { label: 'Horizon',         cmd: 'docker exec -it nexstage-php php artisan horizon' },
     { label: 'Schedule',        cmd: 'docker exec -it nexstage-php php artisan schedule:work' },
     { label: 'Tinker',          cmd: 'docker exec -it nexstage-php php artisan tinker' },
+    { label: 'ngrok (OAuth)',   cmd: 'ngrok http https://127.0.0.1:443 --host-header=nexstage.dev.localhost --domain=tracey-unstiffened-leona.ngrok-free.dev' },
 ];
 
 // ─── Copy button ─────────────────────────────────────────────────────────────

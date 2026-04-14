@@ -5,9 +5,11 @@ import AppLayout from '@/Components/layouts/AppLayout';
 import { DateRangePicker } from '@/Components/shared/DateRangePicker';
 import { PageHeader } from '@/Components/shared/PageHeader';
 import { MetricCard } from '@/Components/shared/MetricCard';
-import { BarChart } from '@/Components/charts/BarChart';
-import { formatNumber, formatDateOnly } from '@/lib/formatters';
+import { GscMultiSeriesChart } from '@/Components/charts/GscMultiSeriesChart';
+import { formatCurrency, formatNumber } from '@/lib/formatters';
 import { cn } from '@/lib/utils';
+import { syncDotClass, syncDotTitle } from '@/lib/syncStatus';
+import { formatGscProperty, getGscPropertyType } from '@/lib/gsc';
 import type { PageProps } from '@/types';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -53,11 +55,13 @@ interface Summary {
 
 interface Props {
     properties: GscProperty[];
-    selected_property: GscProperty | null;
+    selected_property_ids: number[];
     daily_stats: DailyStat[];
     top_queries: QueryRow[];
     top_pages: PageRow[];
     summary: Summary | null;
+    total_revenue: number | null;
+    unattributed_revenue: number | null;
     from: string;
     to: string;
     sort: 'clicks' | 'impressions' | 'ctr' | 'position';
@@ -102,7 +106,7 @@ function SortTh({
                 onClick={() => onSort(col)}
                 className={cn(
                     'flex items-center gap-1 text-xs font-medium uppercase tracking-wide transition-colors',
-                    active ? 'text-indigo-600' : 'text-zinc-400 hover:text-zinc-600',
+                    active ? 'text-primary' : 'text-zinc-400 hover:text-zinc-600',
                     className.includes('text-right') ? 'ml-auto' : '',
                 )}
             >
@@ -177,15 +181,18 @@ function GscTable<T extends { clicks: number; impressions: number; ctr: number |
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 export default function SeoIndex(props: Props) {
-    usePage<PageProps>().props; // access page props for future use
+    const { workspace } = usePage<PageProps>().props;
+    const currency = workspace?.reporting_currency ?? 'EUR';
 
     const {
         properties,
-        selected_property,
+        selected_property_ids,
         daily_stats,
         top_queries,
         top_pages,
         summary,
+        total_revenue,
+        unattributed_revenue,
         from,
         to,
         sort,
@@ -205,15 +212,19 @@ export default function SeoIndex(props: Props) {
         to,
         sort,
         sort_dir,
-        ...(selected_property ? { property_id: String(selected_property.id) } : {}),
-    }), [from, to, sort, sort_dir, selected_property]);
+        ...(selected_property_ids.length > 0 ? { property_ids: selected_property_ids.join(',') } : {}),
+    }), [from, to, sort, sort_dir, selected_property_ids]);
 
-    function selectProperty(id: number | null) {
+    function toggleProperty(id: number) {
+        const next = selected_property_ids.includes(id)
+            ? selected_property_ids.filter((x) => x !== id)
+            : [...selected_property_ids, id];
+        // Selecting all individually == same as "All" (no filter)
         const params = { ...currentParams };
-        if (id === null) {
-            delete params.property_id;
+        if (next.length === 0 || next.length === properties.length) {
+            delete params.property_ids;
         } else {
-            params.property_id = String(id);
+            params.property_ids = next.join(',');
         }
         navigate(params);
     }
@@ -223,9 +234,14 @@ export default function SeoIndex(props: Props) {
         navigate({ ...currentParams, sort: col, sort_dir: newDir });
     }
 
-    // clicks chart data
-    const clicksData = useMemo(() =>
-        daily_stats.map((d) => ({ date: d.date, value: d.clicks })),
+    const chartData = useMemo(() =>
+        daily_stats.map((d) => ({
+            date: d.date,
+            clicks: d.clicks,
+            impressions: d.impressions,
+            ctr: d.ctr,
+            position: d.position,
+        })),
     [daily_stats]);
 
     const hasPartial = daily_stats.some((d) => d.is_partial);
@@ -246,7 +262,7 @@ export default function SeoIndex(props: Props) {
                     </p>
                     <Link
                         href="/settings/integrations"
-                        className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
+                        className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
                     >
                         Connect Google Search Console →
                     </Link>
@@ -261,41 +277,77 @@ export default function SeoIndex(props: Props) {
             <PageHeader title="SEO" subtitle="Google Search Console performance" />
 
             {/* ── Property filter ── */}
-            {properties.length > 1 && (
-                <div className="mb-6 flex flex-wrap items-center gap-2">
+            <div className="mb-6 flex flex-wrap items-center gap-2">
+                {properties.length > 1 && (
                     <button
-                        onClick={() => selectProperty(null)}
+                        onClick={() => navigate({ from, to, sort, sort_dir })}
                         className={cn(
                             'rounded-full border px-3 py-1 text-xs font-medium transition-colors',
-                            selected_property === null
-                                ? 'border-indigo-600 bg-indigo-50 text-indigo-700'
+                            selected_property_ids.length === 0
+                                ? 'border-primary bg-primary/10 text-primary'
                                 : 'border-zinc-200 bg-white text-zinc-600 hover:border-zinc-300',
                         )}
                     >
-                        All properties
+                        All
                     </button>
-                    {properties.map((p) => (
+                )}
+                {properties.map((p) => {
+                    const active = properties.length === 1 || selected_property_ids.length === 0
+                        ? true  // all selected = every pill is "on"
+                        : selected_property_ids.includes(p.id);
+                    return (
                         <button
                             key={p.id}
-                            onClick={() => selectProperty(p.id)}
+                            onClick={() => properties.length > 1 ? toggleProperty(p.id) : undefined}
                             className={cn(
-                                'rounded-full border px-3 py-1 text-xs font-medium transition-colors truncate max-w-[240px]',
-                                selected_property?.id === p.id
-                                    ? 'border-indigo-600 bg-indigo-50 text-indigo-700'
+                                'flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition-colors',
+                                active
+                                    ? 'border-primary bg-primary/10 text-primary'
                                     : 'border-zinc-200 bg-white text-zinc-600 hover:border-zinc-300',
+                                properties.length === 1 && 'cursor-default',
                             )}
-                            title={p.property_url}
+                            title={`${p.property_url} — ${syncDotTitle(p.status, p.last_synced_at)}`}
                         >
-                            {p.property_url}
+                            <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', syncDotClass(p.status, p.last_synced_at))} />
+                            {formatGscProperty(p.property_url)}
+                            {(() => {
+                                const isDomain = getGscPropertyType(p.property_url) === 'domain';
+                                return (
+                                    <span className={`inline-flex items-center rounded-full px-1.5 py-px text-[10px] font-medium ${isDomain ? 'bg-violet-100 text-violet-700' : 'bg-sky-100 text-sky-700'}`}>
+                                        {isDomain ? 'Domain' : 'URL prefix'}
+                                    </span>
+                                );
+                            })()}
                         </button>
-                    ))}
-                </div>
-            )}
+                    );
+                })}
+            </div>
 
             {/* ── GSC lag warning ── */}
             {hasPartial && (
                 <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 text-xs text-amber-700">
-                    Data for the last 3 days may be incomplete — Google Search Console has a 2–3 day reporting lag.
+                    Data for the last 3 days may be incomplete — Google Search Console has a 2–3 day reporting lag.{' '}
+                    <a href="/help/data-accuracy#gsc-lag" className="font-medium underline hover:no-underline">
+                        Learn more
+                    </a>
+                </div>
+            )}
+
+            {/* ── Revenue context cards (only when store is connected) ── */}
+            {(total_revenue !== null || unattributed_revenue !== null) && (
+                <div className="mb-4 grid grid-cols-2 gap-4">
+                    <MetricCard
+                        label="Total Store Revenue"
+                        value={total_revenue !== null ? formatCurrency(total_revenue, currency) : null}
+                        loading={navigating}
+                        tooltip="Total revenue from your store for the selected period, from daily snapshots."
+                    />
+                    <MetricCard
+                        label="Unattributed Revenue"
+                        value={unattributed_revenue !== null ? formatCurrency(unattributed_revenue, currency) : null}
+                        loading={navigating}
+                        tooltip="Revenue not linked to a tracked ad campaign. Includes organic search, direct, email campaigns (Klaviyo, Mailchimp), affiliates, and any other untagged traffic. To separate email revenue, ensure your email campaigns use UTM parameters with utm_medium=email."
+                    />
                 </div>
             )}
 
@@ -326,22 +378,20 @@ export default function SeoIndex(props: Props) {
                 />
             </div>
 
-            {/* ── Daily clicks chart ── */}
+            {/* ── GSC trend chart — clicks, impressions, CTR, avg position ── */}
             <div className="mb-6 rounded-xl border border-zinc-200 bg-white p-5">
-                <div className="mb-4 text-sm font-medium text-zinc-500">Daily clicks</div>
+                <div className="mb-1 text-sm font-medium text-zinc-500">Performance over time</div>
                 {navigating ? (
                     <div className="h-56 w-full animate-pulse rounded-lg bg-zinc-100" />
-                ) : clicksData.length === 0 ? (
+                ) : chartData.length === 0 ? (
                     <div className="flex h-56 flex-col items-center justify-center gap-2">
                         <p className="text-sm text-zinc-400">No data for this period.</p>
                     </div>
                 ) : (
-                    <BarChart
-                        data={clicksData}
+                    <GscMultiSeriesChart
+                        data={chartData}
                         granularity="daily"
-                        seriesLabel="Clicks"
-                        valueType="number"
-                        className="h-56 w-full"
+                        className="w-full"
                     />
                 )}
             </div>
@@ -408,7 +458,7 @@ export default function SeoIndex(props: Props) {
                                         href={row.page}
                                         target="_blank"
                                         rel="noopener noreferrer"
-                                        className="block truncate text-sm text-indigo-600 hover:underline"
+                                        className="block truncate text-sm text-primary hover:underline"
                                         title={row.page}
                                     >
                                         {display}
@@ -420,28 +470,6 @@ export default function SeoIndex(props: Props) {
                 </div>
             </div>
 
-            {/* ── Property status footer ── */}
-            <div className="mt-4 flex flex-wrap gap-3">
-                {properties.map((p) => (
-                    <div
-                        key={p.id}
-                        className="flex items-center gap-1.5 rounded-full border border-zinc-200 bg-white px-3 py-1 text-xs text-zinc-500"
-                    >
-                        <span className={cn(
-                            'h-1.5 w-1.5 rounded-full',
-                            p.status === 'active' ? 'bg-green-500' : 'bg-red-400',
-                        )} />
-                        <span className="truncate max-w-[200px]" title={p.property_url}>
-                            {p.property_url}
-                        </span>
-                        {p.last_synced_at && (
-                            <span className="text-zinc-400">
-                                · synced {formatDateOnly(p.last_synced_at)}
-                            </span>
-                        )}
-                    </div>
-                ))}
-            </div>
         </AppLayout>
     );
 }

@@ -58,8 +58,8 @@ interface Props {
 function SortIcon({ column, sortBy, sortDir }: { column: SortBy; sortBy: SortBy; sortDir: SortDir }) {
     if (column !== sortBy) return <ArrowUpDown className="ml-1 h-3 w-3 opacity-30 shrink-0" />;
     return sortDir === 'asc'
-        ? <ArrowUp className="ml-1 h-3 w-3 text-indigo-500 shrink-0" />
-        : <ArrowDown className="ml-1 h-3 w-3 text-indigo-500 shrink-0" />;
+        ? <ArrowUp className="ml-1 h-3 w-3 text-primary/70 shrink-0" />
+        : <ArrowDown className="ml-1 h-3 w-3 text-primary/70 shrink-0" />;
 }
 
 // ── Inline note cell ────────────────────────────────────────────────────────
@@ -126,7 +126,7 @@ function NoteCell({ date, initialNote }: NoteCellProps) {
                 className={cn(
                     'w-full min-w-[160px] rounded border bg-transparent px-2 py-0.5 text-xs outline-none transition-colors',
                     'placeholder:text-zinc-300',
-                    'focus:border-indigo-300 focus:bg-white focus:shadow-sm',
+                    'focus:border-primary/40 focus:bg-white focus:shadow-sm',
                     value ? 'border-transparent text-zinc-700' : 'border-transparent text-zinc-400',
                     'hover:border-zinc-200',
                 )}
@@ -220,13 +220,12 @@ export default function AnalyticsDaily({
         <AppLayout dateRangePicker={
             <>
                 <DateRangePicker />
-                <StoreFilter selectedStoreIds={store_ids} />
                 <button
                     onClick={toggleHideEmpty}
                     className={cn(
                         'flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm font-medium transition-colors whitespace-nowrap',
                         hide_empty
-                            ? 'border-indigo-300 bg-indigo-50 text-indigo-700'
+                            ? 'border-primary/30 bg-primary/10 text-primary'
                             : 'border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50',
                     )}
                 >
@@ -237,6 +236,7 @@ export default function AnalyticsDaily({
             <Head title="Analytics — Daily Report" />
             <PageHeader title="Analytics" subtitle="Daily breakdown" />
             <AnalyticsTabBar />
+            <StoreFilter selectedStoreIds={store_ids} />
 
             {navigating ? (
                 <div className="space-y-1.5">
@@ -348,7 +348,7 @@ export default function AnalyticsDaily({
                                         'px-3 py-2.5 text-right tabular-nums font-medium',
                                         row.roas !== null && row.roas >= 4
                                             ? 'text-green-700'
-                                            : row.roas !== null && row.roas < 2
+                                            : row.roas !== null && row.roas > 0 && row.roas < 2
                                                 ? 'text-red-600'
                                                 : 'text-zinc-700',
                                     )}>

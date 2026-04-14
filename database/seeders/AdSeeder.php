@@ -81,12 +81,15 @@ class AdSeeder extends Seeder
         };
 
         $cmp = Campaign::create([
-            'workspace_id'  => $workspaceId,
-            'ad_account_id' => $accountId,
-            'external_id'   => $cmpData['ext'],
-            'name'          => $cmpData['name'],
-            'status'        => 'ACTIVE',
-            'objective'     => 'CONVERSIONS',
+            'workspace_id'   => $workspaceId,
+            'ad_account_id'  => $accountId,
+            'external_id'    => $cmpData['ext'],
+            'name'           => $cmpData['name'],
+            'status'         => 'ACTIVE',
+            'objective'      => 'CONVERSIONS',
+            'budget_type'    => 'daily',
+            'daily_budget'   => round($cmpData['budget_factor'] * 150, 2),
+            'bid_strategy'   => 'LOWEST_COST_WITHOUT_CAP',
         ]);
 
         $adset = Adset::create([
@@ -103,55 +106,66 @@ class AdSeeder extends Seeder
             'external_id'     => $cmpData['ext'] . '_ad_1',
             'name'            => $cmpData['name'] . ' — Primary Creative',
             'status'          => 'ACTIVE',
+            'effective_status' => 'ACTIVE',
             'destination_url' => 'https://demo-de.dev.localhost',
         ]);
 
         for ($d = 90; $d >= 0; $d--) {
-            $date  = now()->subDays($d)->toDateString();
-            $spend = round(($cmpData['budget_factor'] * mt_rand(120, 280)) / 10, 2);
-            $impr  = (int) ($spend * mt_rand(180, 320));
-            $clicks = (int) ($impr * (mt_rand(8, 22) / 1000));
-            $roas  = round(mt_rand(18, 55) / 10, 2);
+            $date     = now()->subDays($d)->toDateString();
+            $spend    = round(($cmpData['budget_factor'] * mt_rand(120, 280)) / 10, 2);
+            $impr     = (int) ($spend * mt_rand(180, 320));
+            $clicks   = (int) ($impr * (mt_rand(8, 22) / 1000));
+            $roas     = round(mt_rand(18, 55) / 10, 2);
             $spendEur = round($spend * $toEur, 4);
 
+            $frequency   = round(mt_rand(10, 35) / 10, 2);  // avg impressions per person
+            $conversions = round($clicks * mt_rand(2, 8) / 100, 2);  // 2-8% click-to-purchase
+            $convValue   = round($conversions * mt_rand(120, 320), 4);
+
+            // Campaign-level row: campaign_id set, ad_id NULL.
+            // CTR and CPC are NOT stored — computed on the fly with NULLIF in queries.
+            // See: PLANNING.md "Key patterns — CPM/CPC/CPA"
             AdInsight::create([
-                'workspace_id'                => $workspaceId,
-                'ad_account_id'               => $accountId,
-                'level'                       => 'campaign',
-                'campaign_id'                 => $cmp->id,
-                'adset_id'                    => null,
-                'ad_id'                       => null,
-                'date'                        => $date,
-                'hour'                        => null,
-                'spend'                       => $spend,
-                'spend_in_reporting_currency' => $spendEur,
-                'impressions'                 => $impr,
-                'clicks'                      => $clicks,
-                'reach'                       => (int) ($impr * 0.7),
-                'ctr'                         => $impr > 0 ? round($clicks / $impr, 6) : null,
-                'cpc'                         => $clicks > 0 ? round($spend / $clicks, 4) : null,
-                'platform_roas'               => $roas,
-                'currency'                    => $currency,
+                'workspace_id'                    => $workspaceId,
+                'ad_account_id'                   => $accountId,
+                'level'                           => 'campaign',
+                'campaign_id'                     => $cmp->id,
+                'adset_id'                        => null,
+                'ad_id'                           => null,
+                'date'                            => $date,
+                'hour'                            => null,
+                'spend'                           => $spend,
+                'spend_in_reporting_currency'     => $spendEur,
+                'impressions'                     => $impr,
+                'clicks'                          => $clicks,
+                'reach'                           => (int) ($impr * 0.7),
+                'frequency'                       => $frequency,
+                'platform_roas'                   => $roas,
+                'platform_conversions'            => $conversions,
+                'platform_conversions_value'      => $convValue,
+                'currency'                        => $currency,
             ]);
 
+            // Ad-level row: ad_id set, campaign_id NULL (CHECK constraint requirement).
             AdInsight::create([
-                'workspace_id'                => $workspaceId,
-                'ad_account_id'               => $accountId,
-                'level'                       => 'ad',
-                'campaign_id'                 => $cmp->id,
-                'adset_id'                    => $adset->id,
-                'ad_id'                       => $ad->id,
-                'date'                        => $date,
-                'hour'                        => null,
-                'spend'                       => $spend,
-                'spend_in_reporting_currency' => $spendEur,
-                'impressions'                 => $impr,
-                'clicks'                      => $clicks,
-                'reach'                       => (int) ($impr * 0.7),
-                'ctr'                         => $impr > 0 ? round($clicks / $impr, 6) : null,
-                'cpc'                         => $clicks > 0 ? round($spend / $clicks, 4) : null,
-                'platform_roas'               => $roas,
-                'currency'                    => $currency,
+                'workspace_id'                    => $workspaceId,
+                'ad_account_id'                   => $accountId,
+                'level'                           => 'ad',
+                'campaign_id'                     => null,
+                'adset_id'                        => $adset->id,
+                'ad_id'                           => $ad->id,
+                'date'                            => $date,
+                'hour'                            => null,
+                'spend'                           => $spend,
+                'spend_in_reporting_currency'     => $spendEur,
+                'impressions'                     => $impr,
+                'clicks'                          => $clicks,
+                'reach'                           => (int) ($impr * 0.7),
+                'frequency'                       => $frequency,
+                'platform_roas'                   => $roas,
+                'platform_conversions'            => $conversions,
+                'platform_conversions_value'      => $convValue,
+                'currency'                        => $currency,
             ]);
         }
     }
@@ -197,8 +211,8 @@ class AdSeeder extends Seeder
         ]);
 
         $g2Campaigns = [
-            ['ext' => 'g_uk_cmp_001', 'name' => 'Shopping — All Products',     'budget_factor' => 0.6],
-            ['ext' => 'g_uk_cmp_002', 'name' => 'Search — Brand UK',           'budget_factor' => 0.4],
+            ['ext' => 'g_uk_cmp_001', 'name' => 'Shopping — All Products', 'budget_factor' => 0.6],
+            ['ext' => 'g_uk_cmp_002', 'name' => 'Search — Brand UK',       'budget_factor' => 0.4],
         ];
 
         foreach ($g2Campaigns as $cmpData) {
@@ -221,6 +235,10 @@ class AdSeeder extends Seeder
             'name'          => $cmpData['name'],
             'status'        => 'ENABLED',
             'objective'     => null,
+            'budget_type'   => 'daily',
+            'daily_budget'  => round($cmpData['budget_factor'] * 120, 2),
+            'bid_strategy'  => 'TARGET_CPA',
+            'target_value'  => round(mt_rand(15, 45), 2),
         ]);
 
         $adset = Adset::create([
@@ -232,21 +250,27 @@ class AdSeeder extends Seeder
         ]);
 
         $ad = Ad::create([
-            'workspace_id'    => $workspaceId,
-            'adset_id'        => $adset->id,
-            'external_id'     => $cmpData['ext'] . '_ad_1',
-            'name'            => $cmpData['name'] . ' — RSA 1',
-            'status'          => 'ENABLED',
-            'destination_url' => 'https://demo-de.dev.localhost',
+            'workspace_id'     => $workspaceId,
+            'adset_id'         => $adset->id,
+            'external_id'      => $cmpData['ext'] . '_ad_1',
+            'name'             => $cmpData['name'] . ' — RSA 1',
+            'status'           => 'ENABLED',
+            'effective_status' => 'ENABLED',
+            'destination_url'  => 'https://demo-de.dev.localhost',
         ]);
 
         for ($d = 90; $d >= 0; $d--) {
-            $date   = now()->subDays($d)->toDateString();
-            $spend  = round(($cmpData['budget_factor'] * mt_rand(80, 200)) / 10, 2);
-            $impr   = (int) ($spend * mt_rand(300, 600));
-            $clicks = (int) ($impr * (mt_rand(20, 60) / 1000));
+            $date     = now()->subDays($d)->toDateString();
+            $spend    = round(($cmpData['budget_factor'] * mt_rand(80, 200)) / 10, 2);
+            $impr     = (int) ($spend * mt_rand(300, 600));
+            $clicks   = (int) ($impr * (mt_rand(20, 60) / 1000));
             $spendEur = round($spend * $toEur, 4);
 
+            $conversions      = round($clicks * mt_rand(3, 10) / 100, 2);
+            $convValue        = round($conversions * mt_rand(100, 280), 4);
+            $impressionShare  = round(mt_rand(30, 85) / 100, 4);
+
+            // Campaign-level row: campaign_id set, ad_id NULL.
             AdInsight::create([
                 'workspace_id'                => $workspaceId,
                 'ad_account_id'               => $accountId,
@@ -261,17 +285,19 @@ class AdSeeder extends Seeder
                 'impressions'                 => $impr,
                 'clicks'                      => $clicks,
                 'reach'                       => null,
-                'ctr'                         => $impr > 0 ? round($clicks / $impr, 6) : null,
-                'cpc'                         => $clicks > 0 ? round($spend / $clicks, 4) : null,
                 'platform_roas'               => null,
+                'platform_conversions'        => $conversions,
+                'platform_conversions_value'  => $convValue,
+                'search_impression_share'     => $impressionShare,
                 'currency'                    => $currency,
             ]);
 
+            // Ad-level row: ad_id set, campaign_id NULL (CHECK constraint requirement).
             AdInsight::create([
                 'workspace_id'                => $workspaceId,
                 'ad_account_id'               => $accountId,
                 'level'                       => 'ad',
-                'campaign_id'                 => $cmp->id,
+                'campaign_id'                 => null,
                 'adset_id'                    => $adset->id,
                 'ad_id'                       => $ad->id,
                 'date'                        => $date,
@@ -281,9 +307,10 @@ class AdSeeder extends Seeder
                 'impressions'                 => $impr,
                 'clicks'                      => $clicks,
                 'reach'                       => null,
-                'ctr'                         => $impr > 0 ? round($clicks / $impr, 6) : null,
-                'cpc'                         => $clicks > 0 ? round($spend / $clicks, 4) : null,
                 'platform_roas'               => null,
+                'platform_conversions'        => $conversions,
+                'platform_conversions_value'  => $convValue,
+                'search_impression_share'     => $impressionShare,
                 'currency'                    => $currency,
             ]);
         }

@@ -18,6 +18,8 @@ class GscDailyStat extends Model
         'property_id',
         'workspace_id',
         'date',
+        'device',
+        'country',
         'clicks',
         'impressions',
         'ctr',

@@ -21,10 +21,10 @@ class CreateWorkspaceAction
 {
     public function handle(User $user, string $domain): Workspace
     {
-        // Use just the hostname as the initial name — avoids scheme/path in the slug.
-        // OnboardingController will overwrite this with the real WC site title on success.
+        // Use just the hostname as the workspace name — OnboardingController will overwrite
+        // this with the real WC site title on success.
         $hostname = parse_url($domain, PHP_URL_HOST) ?? $domain;
-        $slug     = $this->generateUniqueSlug($hostname);
+        $slug     = $this->generateUniqueSlug('');
 
         return DB::transaction(function () use ($user, $hostname, $slug): Workspace {
             $workspace = Workspace::create([
@@ -47,21 +47,20 @@ class CreateWorkspaceAction
     }
 
     /**
-     * Generate a slug that is unique across all workspaces.
+     * Generate a random slug that is unique across all workspaces.
      *
-     * @param  int|null  $excludeId  Exclude this workspace ID from the uniqueness check
-     *                               (used when renaming an existing workspace).
+     * Why: workspace slugs are global so name-derived slugs leak customer info
+     * and still need a collision suffix anyway. Random 12-char IDs (Cloudflare-style)
+     * are unguessable and collision-free in practice.
+     *
+     * @param  string    $name       Unused — kept for call-site compatibility.
+     * @param  int|null  $excludeId  Exclude this workspace ID from the uniqueness check.
      */
     public function generateUniqueSlug(string $name, ?int $excludeId = null): string
     {
-        $base = Str::slug($name) ?: 'workspace';
-
-        if (! $this->slugExists($base, $excludeId)) {
-            return $base;
-        }
-
         do {
-            $slug = $base . '-' . Str::lower(Str::random(4));
+            // 32 lowercase hex chars = 128 bits entropy, same as Cloudflare account IDs.
+            $slug = bin2hex(random_bytes(16));
         } while ($this->slugExists($slug, $excludeId));
 
         return $slug;

@@ -18,8 +18,12 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Nightly job that retries FX conversion for orders where
- * total_in_reporting_currency IS NULL (rate was unavailable at sync time).
+ * Nightly job that retries FX conversion for rows where the converted amount
+ * is NULL because the FX rate was unavailable at sync time.
+ *
+ * Covers two tables:
+ *   - orders.total_in_reporting_currency
+ *   - ad_insights.spend_in_reporting_currency
  *
  * Queue:   low
  * Timeout: 300 s
@@ -27,9 +31,8 @@ use Illuminate\Support\Facades\Log;
  * Backoff: default [60, 300, 900] s
  *
  * Processes all workspaces that have NULL conversions. Uses chunk(1000) to
- * prevent OOM on large datasets. Orders that still can't be converted (FX
- * rate genuinely missing) are logged as warnings and left NULL for the next
- * nightly run.
+ * prevent OOM on large datasets. Rows that still can't be converted (FX
+ * rate genuinely missing for that date) are left NULL for the next nightly run.
  *
  * Scheduled daily at 07:00 UTC (routes/console.php).
  */
@@ -47,13 +50,21 @@ class RetryMissingConversionJob implements ShouldQueue
 
     public function handle(FxRateService $fx): void
     {
-        // Find all workspace_ids that have orders with NULL total_in_reporting_currency.
-        $workspaceIds = DB::table('orders')
+        // Collect all workspace_ids that have NULL conversions in either table.
+        $orderWorkspaces = DB::table('orders')
             ->whereNull('total_in_reporting_currency')
             ->whereIn('status', ['completed', 'processing'])
             ->distinct()
             ->pluck('workspace_id')
             ->map(fn ($id) => (int) $id);
+
+        $insightWorkspaces = DB::table('ad_insights')
+            ->whereNull('spend_in_reporting_currency')
+            ->distinct()
+            ->pluck('workspace_id')
+            ->map(fn ($id) => (int) $id);
+
+        $workspaceIds = $orderWorkspaces->merge($insightWorkspaces)->unique()->values();
 
         if ($workspaceIds->isEmpty()) {
             Log::info('RetryMissingConversionJob: no NULL conversions found.');
@@ -88,8 +99,28 @@ class RetryMissingConversionJob implements ShouldQueue
         }
 
         $reportingCurrency = (string) $workspace->reporting_currency;
-        $converted         = 0;
-        $skipped           = 0;
+
+        [$orderConverted, $orderSkipped]     = $this->processOrders($workspaceId, $reportingCurrency, $fx);
+        [$insightConverted, $insightSkipped] = $this->processAdInsights($workspaceId, $reportingCurrency, $fx);
+
+        Log::info('RetryMissingConversionJob: workspace processed', [
+            'workspace_id'     => $workspaceId,
+            'orders_converted' => $orderConverted,
+            'orders_skipped'   => $orderSkipped,
+            'insights_converted' => $insightConverted,
+            'insights_skipped'   => $insightSkipped,
+        ]);
+    }
+
+    /**
+     * Back-fill orders.total_in_reporting_currency for this workspace.
+     *
+     * @return array{int, int}  [converted, skipped]
+     */
+    private function processOrders(int $workspaceId, string $reportingCurrency, FxRateService $fx): array
+    {
+        $converted = 0;
+        $skipped   = 0;
 
         DB::table('orders')
             ->where('workspace_id', $workspaceId)
@@ -110,11 +141,11 @@ class RetryMissingConversionJob implements ShouldQueue
                         );
 
                         $updates[] = [
-                            'id'                           => $order->id,
-                            'total_in_reporting_currency'  => round($amount, 4),
+                            'id'                          => $order->id,
+                            'total_in_reporting_currency' => round($amount, 4),
                         ];
                     } catch (FxRateNotFoundException $e) {
-                        Log::warning('RetryMissingConversionJob: FX rate still unavailable', [
+                        Log::warning('RetryMissingConversionJob: order FX rate still unavailable', [
                             'order_id'           => $order->id,
                             'currency'           => $order->currency,
                             'occurred_at'        => $order->occurred_at,
@@ -124,19 +155,104 @@ class RetryMissingConversionJob implements ShouldQueue
                     }
                 }
 
-                foreach ($updates as $update) {
-                    DB::table('orders')
-                        ->where('id', $update['id'])
-                        ->update(['total_in_reporting_currency' => $update['total_in_reporting_currency']]);
-                }
-
+                $this->batchUpdate('orders', 'total_in_reporting_currency', $updates);
                 $converted += count($updates);
             });
 
-        Log::info('RetryMissingConversionJob: workspace processed', [
-            'workspace_id' => $workspaceId,
-            'converted'    => $converted,
-            'skipped'      => $skipped,
-        ]);
+        return [$converted, $skipped];
+    }
+
+    /**
+     * Back-fill ad_insights.spend_in_reporting_currency for this workspace.
+     *
+     * Groups by distinct (currency, date) pairs so each FX lookup covers many rows at once.
+     * Why: ad_insights rows for the same account/date share the same currency and rate —
+     * computing convert(1.0, ...) once per pair gives the multiplier for all rows in that pair.
+     *
+     * Uses four-case conversion via convert(1.0, ...) which handles cross-rates (e.g. USD→GBP)
+     * correctly via EUR as intermediary. The multiplier is then applied to all matching rows
+     * in a single UPDATE, avoiding N individual queries.
+     *
+     * Related: app/Jobs/Concerns/SyncsAdInsights.php (upsertInsights — original write path)
+     *
+     * @return array{int, int}  [converted, skipped]
+     */
+    private function processAdInsights(int $workspaceId, string $reportingCurrency, FxRateService $fx): array
+    {
+        $converted = 0;
+        $skipped   = 0;
+
+        // Fetch distinct (currency, date) pairs so we can resolve the multiplier once per pair.
+        $pairs = DB::table('ad_insights')
+            ->where('workspace_id', $workspaceId)
+            ->whereNull('spend_in_reporting_currency')
+            ->selectRaw('DISTINCT currency, date::text AS date')
+            ->orderBy('date')
+            ->get();
+
+        foreach ($pairs as $pair) {
+            $currency = (string) $pair->currency;
+            $date     = Carbon::parse((string) $pair->date);
+
+            // convert(1.0, ...) gives the multiplier for any spend amount on this date.
+            // This handles all four conversion cases (same/EUR-from/EUR-to/cross) correctly.
+            try {
+                $multiplier = $fx->convert(1.0, $currency, $reportingCurrency, $date);
+            } catch (FxRateNotFoundException $e) {
+                Log::warning('RetryMissingConversionJob: ad insight FX rate still unavailable', [
+                    'currency'           => $currency,
+                    'date'               => $date->toDateString(),
+                    'reporting_currency' => $reportingCurrency,
+                    'workspace_id'       => $workspaceId,
+                ]);
+                $skipped++;
+                continue;
+            }
+
+            // Apply the multiplier to all NULL rows for this (currency, date) pair in one query.
+            $affected = DB::table('ad_insights')
+                ->where('workspace_id', $workspaceId)
+                ->whereNull('spend_in_reporting_currency')
+                ->where('currency', $currency)
+                ->whereDate('date', $date->toDateString())
+                ->update([
+                    'spend_in_reporting_currency' => DB::raw("ROUND(spend * {$multiplier}, 4)"),
+                ]);
+
+            $converted += $affected;
+        }
+
+        return [$converted, $skipped];
+    }
+
+    /**
+     * Batch update a single column via a parameterized CASE expression.
+     * One query per chunk instead of N individual UPDATE statements.
+     *
+     * @param array<int, array{id: int, string: mixed}> $updates
+     */
+    private function batchUpdate(string $table, string $column, array $updates): void
+    {
+        if (empty($updates)) {
+            return;
+        }
+
+        $ids      = array_column($updates, 'id');
+        $bindings = [];
+        $whens    = [];
+
+        foreach ($updates as $u) {
+            $whens[]    = 'WHEN ? THEN ?';
+            $bindings[] = $u['id'];
+            $bindings[] = $u[$column];
+        }
+
+        $bindings = array_merge($bindings, $ids);
+        $inMarks  = implode(',', array_fill(0, count($ids), '?'));
+
+        DB::statement(
+            "UPDATE {$table} SET {$column} = CASE id " . implode(' ', $whens) . " END WHERE id IN ({$inMarks})",
+            $bindings,
+        );
     }
 }

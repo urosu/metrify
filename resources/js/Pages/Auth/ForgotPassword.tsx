@@ -1,7 +1,6 @@
-import InputError from '@/Components/InputError';
-import PrimaryButton from '@/Components/PrimaryButton';
-import TextInput from '@/Components/TextInput';
-import GuestLayout from '@/Layouts/GuestLayout';
+import AuthLayout from '@/Components/layouts/AuthLayout';
+import { Button } from '@/Components/ui/button';
+import { Input } from '@/Components/ui/input';
 import { Head, useForm } from '@inertiajs/react';
 import { FormEventHandler } from 'react';
 
@@ -17,10 +16,10 @@ export default function ForgotPassword({ status }: { status?: string }) {
     };
 
     return (
-        <GuestLayout>
+        <AuthLayout>
             <Head title="Forgot Password" />
 
-            <div className="mb-4 text-sm text-gray-600">
+            <div className="mb-4 text-sm text-zinc-600">
                 Forgot your password? No problem. Just let us know your email
                 address and we will email you a password reset link that will
                 allow you to choose a new one.
@@ -33,24 +32,22 @@ export default function ForgotPassword({ status }: { status?: string }) {
             )}
 
             <form onSubmit={submit}>
-                <TextInput
+                <Input
                     id="email"
                     type="email"
                     name="email"
                     value={data.email}
-                    className="mt-1 block w-full"
-                    isFocused={true}
+                    autoFocus
                     onChange={(e) => setData('email', e.target.value)}
                 />
-
-                <InputError message={errors.email} className="mt-2" />
+                {errors.email && <p className="mt-2 text-sm text-red-600">{errors.email}</p>}
 
                 <div className="mt-4 flex items-center justify-end">
-                    <PrimaryButton className="ms-4" disabled={processing}>
+                    <Button disabled={processing}>
                         Email Password Reset Link
-                    </PrimaryButton>
+                    </Button>
                 </div>
             </form>
-        </GuestLayout>
+        </AuthLayout>
     );
 }

@@ -1,9 +1,10 @@
-import InputError from '@/Components/InputError';
-import InputLabel from '@/Components/InputLabel';
-import TextInput from '@/Components/TextInput';
+import { Input } from '@/Components/ui/input';
+import { Label } from '@/Components/ui/label';
 import AppLayout from '@/Components/layouts/AppLayout';
 import { PageHeader } from '@/Components/shared/PageHeader';
-import { Head, useForm, router } from '@inertiajs/react';
+import { Head, useForm, router, usePage } from '@inertiajs/react';
+import { wurl } from '@/lib/workspace-url';
+import type { PageProps } from '@/types';
 import { FormEventHandler, useState } from 'react';
 import { formatDateOnly } from '@/lib/formatters';
 
@@ -38,7 +39,7 @@ const ROLE_LABELS: Record<string, string> = {
 };
 
 const ROLE_BADGE: Record<string, string> = {
-    owner:  'bg-indigo-100 text-indigo-700',
+    owner:  'bg-primary/15 text-primary',
     admin:  'bg-zinc-100 text-zinc-700',
     member: 'bg-zinc-50 text-zinc-500',
 };
@@ -46,13 +47,13 @@ const ROLE_BADGE: Record<string, string> = {
 const formatDate = formatDateOnly;
 
 export default function Team({
-    workspace,
+    workspaceInfo,
     members,
     invitations,
     userRole,
     authUser,
 }: {
-    workspace: WorkspaceInfo;
+    workspaceInfo: WorkspaceInfo;
     members: Member[];
     invitations: Invitation[];
     userRole: string;
@@ -60,34 +61,36 @@ export default function Team({
 }) {
     const canManage = userRole === 'owner' || userRole === 'admin';
     const isOwner   = userRole === 'owner';
+    const { workspace: ws } = usePage<PageProps>().props;
+    const w = (path: string) => wurl(ws?.slug, path);
 
     const inviteForm = useForm({ email: '', role: 'member' as string });
     const [transferUserId, setTransferUserId] = useState<number | null>(null);
 
     const submitInvite: FormEventHandler = (e) => {
         e.preventDefault();
-        inviteForm.post(route('settings.team.invite'), {
+        inviteForm.post(w('/settings/team/invite'), {
             onSuccess: () => inviteForm.reset(),
         });
     };
 
     const revokeInvitation = (token: string) => {
-        router.delete(route('settings.team.invitations.destroy', token));
+        router.delete(w(`/settings/team/invitations/${token}`));
     };
 
     const removeMember = (workspaceUserId: number) => {
         if (!confirm('Remove this member from the workspace?')) return;
-        router.delete(route('settings.team.members.destroy', workspaceUserId));
+        router.delete(w(`/settings/team/members/${workspaceUserId}`));
     };
 
     const updateRole = (workspaceUserId: number, role: string) => {
-        router.patch(route('settings.team.members.update', workspaceUserId), { role });
+        router.patch(w(`/settings/team/members/${workspaceUserId}`), { role });
     };
 
     const transferOwnership = () => {
         if (!transferUserId) return;
         if (!confirm('Transfer ownership? You will become an admin.')) return;
-        router.post(route('settings.team.transfer'), { user_id: transferUserId });
+        router.post(w('/settings/team/transfer'), { user_id: transferUserId });
     };
 
     const nonOwnerMembers = members.filter((m) => m.role !== 'owner');
@@ -112,36 +115,36 @@ export default function Team({
                         <form onSubmit={submitInvite} className="px-6 py-5">
                             <div className="flex gap-3">
                                 <div className="flex-1">
-                                    <InputLabel htmlFor="invite_email" value="Email address" />
-                                    <TextInput
+                                    <Label htmlFor="invite_email">Email address</Label>
+                                    <Input
                                         id="invite_email"
                                         type="email"
                                         value={inviteForm.data.email}
                                         onChange={(e) => inviteForm.setData('email', e.target.value)}
-                                        className="mt-1 block w-full"
+                                        className="mt-1"
                                         placeholder="colleague@example.com"
                                         required
                                     />
-                                    <InputError message={inviteForm.errors.email} className="mt-2" />
+                                    {inviteForm.errors.email && <p className="mt-2 text-sm text-red-600">{inviteForm.errors.email}</p>}
                                 </div>
                                 <div className="w-36">
-                                    <InputLabel htmlFor="invite_role" value="Role" />
+                                    <Label htmlFor="invite_role">Role</Label>
                                     <select
                                         id="invite_role"
                                         value={inviteForm.data.role}
                                         onChange={(e) => inviteForm.setData('role', e.target.value)}
-                                        className="mt-1 block w-full rounded-md border-zinc-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
+                                        className="mt-1 block w-full rounded-md border-zinc-300 shadow-sm focus:border-primary focus:ring-primary"
                                     >
                                         <option value="member">Member</option>
                                         <option value="admin">Admin</option>
                                     </select>
-                                    <InputError message={inviteForm.errors.role} className="mt-2" />
+                                    {inviteForm.errors.role && <p className="mt-2 text-sm text-red-600">{inviteForm.errors.role}</p>}
                                 </div>
                             </div>
                             <button
                                 type="submit"
                                 disabled={inviteForm.processing}
-                                className="mt-4 rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50 transition-colors"
+                                className="mt-4 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors"
                             >
                                 Send invitation
                             </button>
@@ -214,7 +217,7 @@ export default function Team({
                                             <select
                                                 value={member.role}
                                                 onChange={(e) => updateRole(member.id, e.target.value)}
-                                                className="rounded border border-zinc-300 py-1 text-xs focus:border-indigo-500 focus:ring-indigo-500"
+                                                className="rounded border border-zinc-300 py-1 text-xs focus:border-primary focus:ring-primary"
                                             >
                                                 <option value="member">Member</option>
                                                 <option value="admin">Admin</option>
@@ -250,7 +253,7 @@ export default function Team({
                                     onChange={(e) =>
                                         setTransferUserId(e.target.value ? parseInt(e.target.value) : null)
                                     }
-                                    className="flex-1 rounded-md border border-zinc-300 py-1.5 text-sm focus:border-indigo-500 focus:ring-indigo-500"
+                                    className="flex-1 rounded-md border border-zinc-300 py-1.5 text-sm focus:border-primary focus:ring-primary"
                                 >
                                     <option value="">Select a member…</option>
                                     {nonOwnerMembers.map((m) => (

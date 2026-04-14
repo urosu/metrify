@@ -28,11 +28,19 @@ class AdInsight extends Model
         'impressions',
         'clicks',
         'reach',
-        'ctr',
-        'cpc',
+        'frequency',
+        'platform_conversions',
+        'platform_conversions_value',
+        'search_impression_share',
         'platform_roas',
         'currency',
+        'raw_insights',
+        'raw_insights_api_version',
     ];
+
+    // Why ctr/cpc are not stored: computed on the fly with NULLIF to avoid stale cached values.
+    // CTR = clicks / NULLIF(impressions, 0), CPC = spend / NULLIF(clicks, 0)
+    // See: PLANNING.md "ad_insights — computed columns"
 
     protected function casts(): array
     {
@@ -40,9 +48,12 @@ class AdInsight extends Model
             'date' => 'date',
             'spend' => 'decimal:4',
             'spend_in_reporting_currency' => 'decimal:4',
-            'ctr' => 'decimal:6',
-            'cpc' => 'decimal:4',
+            'frequency' => 'decimal:2',
+            'platform_conversions' => 'decimal:2',
+            'platform_conversions_value' => 'decimal:4',
+            'search_impression_share' => 'decimal:4',
             'platform_roas' => 'decimal:4',
+            'raw_insights' => 'array',
         ];
     }
 

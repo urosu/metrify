@@ -53,7 +53,7 @@ class WorkspaceTeamController extends Controller
             ->value('role') ?? 'member';
 
         return Inertia::render('Settings/Team', [
-            'workspace'   => ['id' => $workspace->id, 'name' => $workspace->name, 'owner_id' => $workspace->owner_id],
+            'workspaceInfo' => ['id' => $workspace->id, 'name' => $workspace->name, 'owner_id' => $workspace->owner_id],
             'members'     => $members,
             'invitations' => $invitations,
             'userRole'    => $userRole,

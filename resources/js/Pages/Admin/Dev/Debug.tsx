@@ -15,6 +15,7 @@ import {
 import AppLayout from '@/Components/layouts/AppLayout';
 import { PageHeader } from '@/Components/shared/PageHeader';
 import { formatDatetime } from '@/lib/formatters';
+import { formatGscProperty } from '@/lib/gsc';
 import type { PageProps } from '@/types';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -305,7 +306,7 @@ export default function Debug({ context }: Props) {
                                         {gsc_properties.map((p) => (
                                             <tr key={p.id}>
                                                 <td className="py-2 pr-4 font-mono text-zinc-500">{p.id}</td>
-                                                <td className="py-2 pr-4 text-zinc-800 break-all">{p.property_url}</td>
+                                                <td className="py-2 pr-4 text-zinc-800 break-all" title={p.property_url}>{formatGscProperty(p.property_url)}</td>
                                                 <td className="py-2 pr-4"><StatusBadge status={p.status} /></td>
                                                 <td className="py-2 pr-4 text-zinc-600">{p.consecutive_sync_failures}</td>
                                                 <td className="py-2 text-zinc-500 text-xs">{fmt(p.last_synced_at)}</td>

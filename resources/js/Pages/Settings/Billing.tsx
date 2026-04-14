@@ -4,9 +4,9 @@ import AppLayout from '@/Components/layouts/AppLayout';
 import { PageHeader } from '@/Components/shared/PageHeader';
 import { formatDateOnly } from '@/lib/formatters';
 import { type PageProps } from '@/types';
-import InputLabel from '@/Components/InputLabel';
-import InputError from '@/Components/InputError';
-import TextInput from '@/Components/TextInput';
+import { wurl } from '@/lib/workspace-url';
+import { Input } from '@/Components/ui/input';
+import { Label } from '@/Components/ui/label';
 import { loadStripe } from '@stripe/stripe-js';
 import { Elements, PaymentElement, useStripe, useElements } from '@stripe/react-stripe-js';
 
@@ -132,6 +132,8 @@ interface Subscription {
 interface TierPrices {
     monthly: number | null;
     annual: number | null;
+    rate_gmv: number | null;
+    rate_ad_spend: number | null;
 }
 
 interface PaymentMethod {
@@ -162,7 +164,7 @@ interface UpcomingInvoice {
 }
 
 interface Props {
-    workspace: WorkspaceBilling;
+    workspaceInfo: WorkspaceBilling;
     subscription: Subscription | null;
     upcoming_invoice: UpcomingInvoice | null;
     payment_methods: PaymentMethod[];
@@ -177,6 +179,8 @@ interface Props {
     day_of_month: number;
     days_in_month: number;
     tier_prices: Record<string, TierPrices>;
+    /** 'gmv' for ecom workspaces (has_store=true), 'ad_spend' for non-ecom */
+    billing_basis: 'gmv' | 'ad_spend';
     status?: string;
 }
 
@@ -186,8 +190,14 @@ const PLAN_LABELS: Record<string, string> = {
     starter: 'Starter',
     growth: 'Growth',
     scale: 'Scale',
-    percentage: 'Growth+',
     enterprise: 'Enterprise',
+};
+
+// Revenue thresholds per tier (in EUR, for display purposes)
+const TIER_THRESHOLDS: Record<string, string> = {
+    starter: '€0 – €5k / mo',
+    growth:  '€5k – €25k / mo',
+    scale:   'Over €25k / mo',
 };
 
 function formatEur(value: number): string {
@@ -221,7 +231,7 @@ function StatusBadge({ children, variant }: { children: React.ReactNode; variant
         green: 'bg-green-100 text-green-700',
         yellow: 'bg-yellow-100 text-yellow-700',
         red: 'bg-red-100 text-red-700',
-        indigo: 'bg-indigo-100 text-indigo-700',
+        indigo: 'bg-primary/15 text-primary',
     };
     return (
         <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${colors[variant]}`}>
@@ -237,6 +247,8 @@ function AddPaymentMethodInner({ onSuccess, onCancel }: { onSuccess: (pmId?: str
     const elements = useElements();
     const [error, setError]         = useState<string | null>(null);
     const [saving, setSaving]       = useState(false);
+    const { workspace: ws } = usePage<PageProps>().props;
+    const w = (path: string) => wurl(ws?.slug, path);
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -253,7 +265,7 @@ function AddPaymentMethodInner({ onSuccess, onCancel }: { onSuccess: (pmId?: str
         }
 
         // Fetch a fresh SetupIntent client_secret from Laravel
-        const res = await fetch(route('settings.billing.setup-intent'), {
+        const res = await fetch(w('/settings/billing/payment-methods/setup-intent'), {
             method: 'POST',
             headers: {
                 'X-CSRF-TOKEN': document.querySelector<HTMLMetaElement>('meta[name="csrf-token"]')?.content ?? '',
@@ -297,7 +309,7 @@ function AddPaymentMethodInner({ onSuccess, onCancel }: { onSuccess: (pmId?: str
                 <button
                     type="submit"
                     disabled={saving || !stripe}
-                    className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50 transition-colors"
+                    className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors"
                 >
                     {saving ? 'Saving…' : 'Save card'}
                 </button>
@@ -326,7 +338,7 @@ function AddPaymentMethodForm({ onSuccess, onCancel }: { onSuccess: (pmId?: stri
 type Tab = 'overview' | 'payment-methods' | 'invoices';
 
 export default function Billing({
-    workspace,
+    workspaceInfo,
     subscription,
     upcoming_invoice,
     payment_methods,
@@ -341,9 +353,11 @@ export default function Billing({
     day_of_month,
     days_in_month,
     tier_prices,
+    billing_basis,
     status,
 }: Props) {
-    const { errors } = usePage<PageProps<{ errors: Record<string, string> }>>().props;
+    const { errors, workspace: ws } = usePage<PageProps<{ errors: Record<string, string> }>>().props;
+    const w = (path: string) => wurl(ws?.slug, path);
 
     const [tab, setTab]             = useState<Tab>('overview');
     const [interval, setInterval]   = useState<'monthly' | 'annual'>('monthly');
@@ -351,16 +365,16 @@ export default function Billing({
     const [showAddCard, setShowAddCard] = useState(false);
 
     const detailsForm = useForm({
-        billing_name: workspace.billing_name ?? '',
-        billing_email: workspace.billing_email ?? '',
-        'billing_address.company': workspace.billing_address?.company ?? '',
-        'billing_address.country': workspace.billing_address?.country ?? '',
-        'billing_address.line1': workspace.billing_address?.line1 ?? '',
-        'billing_address.line2': workspace.billing_address?.line2 ?? '',
-        'billing_address.city': workspace.billing_address?.city ?? '',
-        'billing_address.state': workspace.billing_address?.state ?? '',
-        'billing_address.postal_code': workspace.billing_address?.postal_code ?? '',
-        vat_number: workspace.vat_number ?? '',
+        billing_name: workspaceInfo.billing_name ?? '',
+        billing_email: workspaceInfo.billing_email ?? '',
+        'billing_address.company': workspaceInfo.billing_address?.company ?? '',
+        'billing_address.country': workspaceInfo.billing_address?.country ?? '',
+        'billing_address.line1': workspaceInfo.billing_address?.line1 ?? '',
+        'billing_address.line2': workspaceInfo.billing_address?.line2 ?? '',
+        'billing_address.city': workspaceInfo.billing_address?.city ?? '',
+        'billing_address.state': workspaceInfo.billing_address?.state ?? '',
+        'billing_address.postal_code': workspaceInfo.billing_address?.postal_code ?? '',
+        vat_number: workspaceInfo.vat_number ?? '',
     });
 
     const selectedCountry = detailsForm.data['billing_address.country'];
@@ -368,48 +382,63 @@ export default function Billing({
 
     const submitDetails: React.FormEventHandler<HTMLFormElement> = (e) => {
         e.preventDefault();
-        detailsForm.patch(route('settings.billing.details'));
+        detailsForm.patch(w('/settings/billing/details'));
     };
 
     const handleSubscribe = () => {
         setSubscribing(true);
-        router.post(route('settings.billing.subscribe'), { interval }, {
+        router.post(w('/settings/billing/subscribe'), { interval }, {
             onFinish: () => setSubscribing(false),
         });
     };
 
     const handleCancel = () => {
         if (!confirm('Cancel your subscription? You retain access until the end of the billing period.')) return;
-        router.delete(route('settings.billing.cancel'));
+        router.delete(w('/settings/billing/cancel'));
     };
 
     const handleResume = () => {
-        router.post(route('settings.billing.resume'));
+        router.post(w('/settings/billing/resume'));
     };
 
     // ── Derived state ──────────────────────────────────────────────────────
 
-    const isOnTrial = workspace.trial_ends_at
-        ? new Date(workspace.trial_ends_at) > new Date()
+    const isOnTrial = workspaceInfo.trial_ends_at
+        ? new Date(workspaceInfo.trial_ends_at) > new Date()
         : false;
 
-    const trialEnded = workspace.trial_ends_at
-        ? new Date(workspace.trial_ends_at) <= new Date()
+    const trialEnded = workspaceInfo.trial_ends_at
+        ? new Date(workspaceInfo.trial_ends_at) <= new Date()
         : false;
 
-    const currentPlan = workspace.billing_plan;
+    const currentPlan = workspaceInfo.billing_plan;
 
     function tierCost(tier: string, billingInterval: 'monthly' | 'annual'): number | null {
-        if (tier === 'percentage') return null;
+        if (tier === 'scale') return null; // metered — no flat fee
         return (billingInterval === 'annual' ? tier_prices[tier]?.annual : tier_prices[tier]?.monthly) ?? null;
     }
 
     function revenueCost(tier: string, revenue: number, billingInterval: 'monthly' | 'annual'): number | null {
-        if (tier === 'percentage') return Math.max(Math.round(revenue * 0.01), 149);
+        if (tier === 'scale') {
+            const rate = billing_basis === 'ad_spend'
+                ? (tier_prices['scale']?.rate_ad_spend ?? 0.02)
+                : (tier_prices['scale']?.rate_gmv ?? 0.01);
+            return Math.max(Math.round(revenue * rate), 149);
+        }
         return tierCost(tier, billingInterval);
     }
 
-    const lastMonthCost     = last_month_revenue > 0 ? revenueCost(resolved_tier, last_month_revenue, interval) : null;
+    // Label for the billable amount metric (GMV or ad spend)
+    const billableLabel = billing_basis === 'ad_spend' ? 'ad spend' : 'revenue';
+    const scaleRateLabel = billing_basis === 'ad_spend' ? '2% of ad spend' : '1% of GMV';
+
+    // Days remaining in trial (for countdown warning)
+    const trialDaysLeft = workspaceInfo.trial_ends_at
+        ? Math.ceil((new Date(workspaceInfo.trial_ends_at).getTime() - Date.now()) / 86_400_000)
+        : null;
+
+    // lastMonthCost: always monthly — this shows historical billing, not the subscribe toggle
+    const lastMonthCost     = last_month_revenue > 0 ? revenueCost(resolved_tier, last_month_revenue, 'monthly') : null;
     const displayTier       = projected_month_tier ?? current_month_tier;
     const displayRevenue    = projected_month_revenue ?? current_month_revenue;
     const displayCost       = revenueCost(displayTier, displayRevenue, interval);
@@ -433,6 +462,23 @@ export default function Billing({
             />
 
             <div className="mt-6 max-w-3xl">
+
+                {/* Trial expiry warning — shown when ≤7 days left and no paid plan */}
+                {trialDaysLeft !== null && trialDaysLeft > 0 && trialDaysLeft <= 7 && !workspaceInfo.billing_plan && (
+                    <div className="mb-5 flex items-start gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3">
+                        <svg className="mt-0.5 h-4 w-4 shrink-0 text-red-500" viewBox="0 0 20 20" fill="currentColor">
+                            <path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 0 1 .75.75v3.5a.75.75 0 0 1-1.5 0v-3.5A.75.75 0 0 1 10 5zm0 9a1 1 0 1 1 0-2 1 1 0 0 1 0 2z" clipRule="evenodd" />
+                        </svg>
+                        <div className="flex-1">
+                            <p className="text-sm font-medium text-red-700">
+                                Trial ends in {trialDaysLeft} {trialDaysLeft === 1 ? 'day' : 'days'}
+                            </p>
+                            <p className="mt-0.5 text-xs text-red-600">
+                                Subscribe below to keep your syncs running and avoid data gaps.
+                            </p>
+                        </div>
+                    </div>
+                )}
 
                 {/* Flash / errors */}
                 {status && (
@@ -492,10 +538,10 @@ export default function Billing({
                                             <>
                                                 <p className="mt-1 text-base font-semibold text-zinc-900">{PLAN_LABELS[resolved_tier] ?? resolved_tier}</p>
                                                 <p className="text-xl font-semibold text-zinc-900">
-                                                    {lastMonthCost !== null ? `${formatEur(lastMonthCost)}/mo` : '1% of revenue'}
+                                                    {lastMonthCost !== null ? `${formatEur(lastMonthCost)}/mo` : scaleRateLabel}
                                                     <span className="ml-1.5 text-xs font-normal text-zinc-400">billed</span>
                                                 </p>
-                                                <p className="text-xs text-zinc-400">{formatEur(last_month_revenue)} revenue</p>
+                                                <p className="text-xs text-zinc-400">{formatEur(last_month_revenue)} {billableLabel}</p>
                                             </>
                                         ) : (
                                             <p className="mt-1 text-sm text-zinc-400">No data yet</p>
@@ -516,11 +562,15 @@ export default function Billing({
                                             <>
                                                 <p className="mt-1 text-base font-semibold text-zinc-900">{PLAN_LABELS[displayTier] ?? displayTier}</p>
                                                 <p className="text-xl font-semibold text-zinc-900">
-                                                    {displayCost !== null ? `${formatEur(displayCost)}/mo` : '1% of revenue'}
-                                                    <span className="ml-1.5 text-xs font-normal text-zinc-400">est.</span>
+                                                    {displayCost !== null
+                                                        ? `${formatEur(displayCost)}${interval === 'annual' ? '/yr' : '/mo'}`
+                                                        : scaleRateLabel}
+                                                    <span className="ml-1.5 text-xs font-normal text-zinc-400">
+                                                        {interval === 'annual' ? 'est. billed annually' : 'est.'}
+                                                    </span>
                                                 </p>
                                                 <p className="text-xs text-zinc-400">
-                                                    {formatEur(current_month_revenue)} so far · {formatEur(projected_month_revenue!)} projected · day {day_of_month} of {days_in_month}
+                                                    {formatEur(current_month_revenue)} {billableLabel} so far · {formatEur(projected_month_revenue!)} projected · day {day_of_month} of {days_in_month}
                                                 </p>
                                                 {tierChangePending && (
                                                     <p className="mt-1 text-xs font-medium text-yellow-600">
@@ -558,9 +608,9 @@ export default function Billing({
                                 )}
 
                                 {/* Trial expiry / grace period detail */}
-                                {isOnTrial && !currentPlan && workspace.trial_ends_at && (
+                                {isOnTrial && !currentPlan && workspaceInfo.trial_ends_at && (
                                     <p className="text-sm text-zinc-500">
-                                        Trial ends {formatDateOnly(workspace.trial_ends_at)}
+                                        Trial ends {formatDateOnly(workspaceInfo.trial_ends_at)}
                                     </p>
                                 )}
                                 {currentPlan && subscription?.on_grace_period && subscription.ends_at && (
@@ -579,7 +629,7 @@ export default function Billing({
                                         <button
                                             type="button"
                                             onClick={handleResume}
-                                            className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 transition-colors"
+                                            className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
                                         >
                                             Resume subscription
                                         </button>
@@ -602,7 +652,30 @@ export default function Billing({
                                         {trialEnded && (
                                             <p className="text-sm text-red-600">Your trial has ended. Subscribe to continue using Nexstage.</p>
                                         )}
-                                        {resolved_tier !== 'percentage' && (
+
+                                        {/* Tier reference table */}
+                                        <div className="rounded-lg border border-zinc-100 bg-zinc-50 px-4 py-3 text-xs text-zinc-500">
+                                            <p className="mb-2 font-medium text-zinc-600">
+                                                Tier is assigned automatically based on last month's {billing_basis === 'ad_spend' ? 'ad spend' : 'GMV'}.
+                                            </p>
+                                            <div className="space-y-1">
+                                                {['starter', 'growth', 'scale'].map((tier) => (
+                                                    <div key={tier} className={`flex items-center justify-between rounded px-2 py-1 ${resolved_tier === tier ? 'bg-primary/10 font-medium text-primary' : ''}`}>
+                                                        <span>{PLAN_LABELS[tier]}</span>
+                                                        <span className="ml-4">{TIER_THRESHOLDS[tier]}</span>
+                                                        <span className="ml-4">
+                                                            {tier === 'scale'
+                                                                ? `${scaleRateLabel}, min €149/mo`
+                                                                : interval === 'annual'
+                                                                    ? `€${tier === 'starter' ? '290' : '590'}/yr`
+                                                                    : `€${tier === 'starter' ? '29' : '59'}/mo`}
+                                                        </span>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+
+                                        {resolved_tier !== 'scale' && (
                                             <div>
                                                 <p className="mb-2 text-xs font-medium text-zinc-500 uppercase tracking-wide">Billing interval</p>
                                                 <div className="flex w-48 rounded-md border border-zinc-200 overflow-hidden text-sm">
@@ -631,7 +704,7 @@ export default function Billing({
                                                 type="button"
                                                 disabled={subscribing}
                                                 onClick={handleSubscribe}
-                                                className="rounded-md bg-indigo-600 px-5 py-2.5 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50 transition-colors"
+                                                className="rounded-md bg-primary px-5 py-2.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors"
                                             >
                                                 {subscribing ? 'Redirecting…' : 'Subscribe'}
                                             </button>
@@ -651,62 +724,62 @@ export default function Billing({
                             <form onSubmit={submitDetails} className="space-y-4 px-6 py-5">
                                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                                     <div>
-                                        <InputLabel htmlFor="billing_name" value="Full name" />
-                                        <TextInput id="billing_name" value={detailsForm.data.billing_name} onChange={(e) => detailsForm.setData('billing_name', e.target.value)} className="mt-1 block w-full" placeholder="Jane Smith" required />
-                                        <InputError message={detailsForm.errors.billing_name} className="mt-1" />
+                                        <Label htmlFor="billing_name">Full name</Label>
+                                        <Input id="billing_name" value={detailsForm.data.billing_name} onChange={(e) => detailsForm.setData('billing_name', e.target.value)} className="mt-1" placeholder="Jane Smith" required />
+                                        {detailsForm.errors.billing_name && <p className="mt-1 text-sm text-red-600">{detailsForm.errors.billing_name}</p>}
                                     </div>
                                     <div>
-                                        <InputLabel htmlFor="billing_email" value="Billing email" />
-                                        <TextInput id="billing_email" type="email" value={detailsForm.data.billing_email} onChange={(e) => detailsForm.setData('billing_email', e.target.value)} className="mt-1 block w-full" required />
-                                        <InputError message={detailsForm.errors.billing_email} className="mt-1" />
+                                        <Label htmlFor="billing_email">Billing email</Label>
+                                        <Input id="billing_email" type="email" value={detailsForm.data.billing_email} onChange={(e) => detailsForm.setData('billing_email', e.target.value)} className="mt-1" required />
+                                        {detailsForm.errors.billing_email && <p className="mt-1 text-sm text-red-600">{detailsForm.errors.billing_email}</p>}
                                     </div>
                                 </div>
                                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                                     <div>
-                                        <InputLabel htmlFor="company" value="Company (optional)" />
-                                        <TextInput id="company" value={detailsForm.data['billing_address.company']} onChange={(e) => detailsForm.setData('billing_address.company', e.target.value as never)} className="mt-1 block w-full" placeholder={workspace.name} />
+                                        <Label htmlFor="company">Company (optional)</Label>
+                                        <Input id="company" value={detailsForm.data['billing_address.company']} onChange={(e) => detailsForm.setData('billing_address.company', e.target.value as never)} className="mt-1" placeholder={workspaceInfo.name} />
                                     </div>
                                     <div>
-                                        <InputLabel htmlFor="vat_number" value="VAT number (optional)" />
-                                        <TextInput id="vat_number" value={detailsForm.data.vat_number} onChange={(e) => detailsForm.setData('vat_number', e.target.value)} className="mt-1 block w-full" placeholder="DE123456789" />
-                                        <InputError message={detailsForm.errors.vat_number} className="mt-1" />
+                                        <Label htmlFor="vat_number">VAT number (optional)</Label>
+                                        <Input id="vat_number" value={detailsForm.data.vat_number} onChange={(e) => detailsForm.setData('vat_number', e.target.value)} className="mt-1" placeholder="DE123456789" />
+                                        {detailsForm.errors.vat_number && <p className="mt-1 text-sm text-red-600">{detailsForm.errors.vat_number}</p>}
                                     </div>
                                 </div>
                                 <div className="sm:max-w-xs">
-                                    <InputLabel htmlFor="country" value="Country" />
-                                    <select id="country" value={detailsForm.data['billing_address.country']} onChange={(e) => { detailsForm.setData('billing_address.country', e.target.value as never); detailsForm.setData('billing_address.state', '' as never); }} className="mt-1 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500">
+                                    <Label htmlFor="country">Country</Label>
+                                    <select id="country" value={detailsForm.data['billing_address.country']} onChange={(e) => { detailsForm.setData('billing_address.country', e.target.value as never); detailsForm.setData('billing_address.state', '' as never); }} className="mt-1 block w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 shadow-sm focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary">
                                         <option value="">Select country…</option>
                                         {COUNTRIES.map((c) => (<option key={c.code} value={c.code}>{c.name}</option>))}
                                     </select>
-                                    <InputError message={detailsForm.errors['billing_address.country']} className="mt-1" />
+                                    {detailsForm.errors['billing_address.country'] && <p className="mt-1 text-sm text-red-600">{detailsForm.errors['billing_address.country']}</p>}
                                 </div>
                                 <div>
-                                    <InputLabel htmlFor="line1" value="Address line 1" />
-                                    <TextInput id="line1" value={detailsForm.data['billing_address.line1']} onChange={(e) => detailsForm.setData('billing_address.line1', e.target.value as never)} className="mt-1 block w-full" placeholder="Street address" />
+                                    <Label htmlFor="line1">Address line 1</Label>
+                                    <Input id="line1" value={detailsForm.data['billing_address.line1']} onChange={(e) => detailsForm.setData('billing_address.line1', e.target.value as never)} className="mt-1" placeholder="Street address" />
                                 </div>
                                 <div>
-                                    <InputLabel htmlFor="line2" value="Address line 2 (optional)" />
-                                    <TextInput id="line2" value={detailsForm.data['billing_address.line2']} onChange={(e) => detailsForm.setData('billing_address.line2', e.target.value as never)} className="mt-1 block w-full" placeholder="Suite, floor, etc." />
+                                    <Label htmlFor="line2">Address line 2 (optional)</Label>
+                                    <Input id="line2" value={detailsForm.data['billing_address.line2']} onChange={(e) => detailsForm.setData('billing_address.line2', e.target.value as never)} className="mt-1" placeholder="Suite, floor, etc." />
                                 </div>
                                 <div className="grid grid-cols-3 gap-4">
                                     <div className="col-span-2">
-                                        <InputLabel htmlFor="city" value="City" />
-                                        <TextInput id="city" value={detailsForm.data['billing_address.city']} onChange={(e) => detailsForm.setData('billing_address.city', e.target.value as never)} className="mt-1 block w-full" />
+                                        <Label htmlFor="city">City</Label>
+                                        <Input id="city" value={detailsForm.data['billing_address.city']} onChange={(e) => detailsForm.setData('billing_address.city', e.target.value as never)} className="mt-1" />
                                     </div>
                                     <div>
-                                        <InputLabel htmlFor="postal_code" value="Postcode" />
-                                        <TextInput id="postal_code" value={detailsForm.data['billing_address.postal_code']} onChange={(e) => detailsForm.setData('billing_address.postal_code', e.target.value as never)} className="mt-1 block w-full" />
+                                        <Label htmlFor="postal_code">Postcode</Label>
+                                        <Input id="postal_code" value={detailsForm.data['billing_address.postal_code']} onChange={(e) => detailsForm.setData('billing_address.postal_code', e.target.value as never)} className="mt-1" />
                                     </div>
                                 </div>
                                 {stateLabel && (
                                     <div className="sm:max-w-xs">
-                                        <InputLabel htmlFor="state" value={stateLabel} />
-                                        <TextInput id="state" value={detailsForm.data['billing_address.state']} onChange={(e) => detailsForm.setData('billing_address.state', e.target.value as never)} className="mt-1 block w-full" placeholder={selectedCountry === 'US' ? 'CA' : ''} />
-                                        <InputError message={detailsForm.errors['billing_address.state']} className="mt-1" />
+                                        <Label htmlFor="state">{stateLabel}</Label>
+                                        <Input id="state" value={detailsForm.data['billing_address.state']} onChange={(e) => detailsForm.setData('billing_address.state', e.target.value as never)} className="mt-1" placeholder={selectedCountry === 'US' ? 'CA' : ''} />
+                                        {detailsForm.errors['billing_address.state'] && <p className="mt-1 text-sm text-red-600">{detailsForm.errors['billing_address.state']}</p>}
                                     </div>
                                 )}
                                 <div className="flex items-center gap-4 pt-1">
-                                    <button type="submit" disabled={detailsForm.processing} className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50 transition-colors">
+                                    <button type="submit" disabled={detailsForm.processing} className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors">
                                         Save details
                                     </button>
                                     {detailsForm.recentlySuccessful && <span className="text-sm text-green-600">Saved.</span>}
@@ -734,7 +807,7 @@ export default function Billing({
                             {payment_methods.length === 0 && !showAddCard && (
                                 <div className="py-8 text-center">
                                     <p className="text-sm text-zinc-500">No payment methods on file.</p>
-                                    <button type="button" onClick={() => setShowAddCard(true)} className="mt-3 text-sm text-indigo-600 hover:text-indigo-800 transition-colors">
+                                    <button type="button" onClick={() => setShowAddCard(true)} className="mt-3 text-sm text-primary hover:text-primary/70 transition-colors">
                                         Add your first card →
                                     </button>
                                 </div>
@@ -754,11 +827,11 @@ export default function Billing({
                                         {pm.is_default ? (
                                             <StatusBadge variant="green">Default</StatusBadge>
                                         ) : (
-                                            <button type="button" onClick={() => router.post(route('settings.billing.payment-methods.default', { pmId: pm.id }))} className="text-xs text-indigo-600 hover:text-indigo-800 transition-colors">
+                                            <button type="button" onClick={() => router.post(w(`/settings/billing/payment-methods/${pm.id}/default`))} className="text-xs text-primary hover:text-primary/70 transition-colors">
                                                 Set as default
                                             </button>
                                         )}
-                                        <button type="button" onClick={() => { if (confirm('Remove this payment method?')) router.delete(route('settings.billing.payment-methods.delete', { pmId: pm.id })); }} className="text-xs text-red-500 hover:text-red-700 transition-colors">
+                                        <button type="button" onClick={() => { if (confirm('Remove this payment method?')) router.delete(w(`/settings/billing/payment-methods/${pm.id}`)); }} className="text-xs text-red-500 hover:text-red-700 transition-colors">
                                             Remove
                                         </button>
                                     </div>
@@ -771,7 +844,7 @@ export default function Billing({
                                         onSuccess={(pmId) => {
                                             setShowAddCard(false);
                                             if (pmId) {
-                                                router.post(route('settings.billing.payment-methods.confirm', { pmId }));
+                                                router.post(w(`/settings/billing/payment-methods/${pmId}/confirm`));
                                             } else {
                                                 router.reload();
                                             }
@@ -821,7 +894,7 @@ export default function Billing({
                                                 </StatusBadge>
                                             </td>
                                             <td className="px-6 py-3 text-right whitespace-nowrap">
-                                                <a href={inv.download_url} className="text-xs text-indigo-600 hover:text-indigo-800 transition-colors mr-3">PDF</a>
+                                                <a href={inv.download_url} className="text-xs text-primary hover:text-primary/70 transition-colors mr-3">PDF</a>
                                                 {inv.hosted_url && (
                                                     <a href={inv.hosted_url} target="_blank" rel="noopener noreferrer" className="text-xs text-zinc-400 hover:text-zinc-600 transition-colors">View</a>
                                                 )}

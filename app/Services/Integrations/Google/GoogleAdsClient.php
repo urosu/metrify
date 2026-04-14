@@ -10,6 +10,7 @@ use App\Exceptions\GoogleRateLimitException;
 use App\Exceptions\GoogleTokenExpiredException;
 use App\Models\AdAccount;
 use Illuminate\Http\Client\Response;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -140,9 +141,18 @@ class GoogleAdsClient
     // -------------------------------------------------------------------------
 
     /**
-     * Fetch all non-removed campaigns for a customer.
+     * Fetch all non-removed campaigns for a customer, including budget and bid fields.
      *
-     * @return list<array{id: string, name: string, status: string, objective: string|null}>
+     * Budget fields captured for campaigns table:
+     * - campaign_budget.amount_micros → daily_budget (DAILY period) or lifetime_budget (FIXED period)
+     * - campaign_budget.period        → budget_type ('daily' | 'lifetime')
+     * - campaign.bidding_strategy_type → bid_strategy
+     * - campaign.target_cpa.target_cpa_micros / campaign.target_roas.target_roas → target_value
+     *
+     * Response uses camelCase keys (Google Ads API JSON format).
+     * See PLANNING.md "campaigns" schema.
+     *
+     * @return list<array<string, mixed>>
      *
      * @throws GoogleTokenExpiredException
      * @throws GoogleRateLimitException
@@ -151,7 +161,10 @@ class GoogleAdsClient
     public function fetchCampaigns(string $customerId): array
     {
         $gaql = <<<'GAQL'
-            SELECT campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type
+            SELECT campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type,
+                   campaign_budget.amount_micros, campaign_budget.period,
+                   campaign.bidding_strategy_type,
+                   campaign.target_cpa.target_cpa_micros, campaign.target_roas.target_roas
             FROM campaign
             WHERE campaign.status != 'REMOVED'
             GAQL;
@@ -168,6 +181,13 @@ class GoogleAdsClient
      *
      * Per spec: Google Ads has no hourly data — hour is always NULL.
      * reach and platform_roas are always NULL for Google Ads.
+     * frequency is always NULL for Google Ads (Facebook-only metric).
+     *
+     * Fields captured:
+     * - metrics.conversions         → platform_conversions
+     * - metrics.search_impression_share → search_impression_share (0.0–1.0 float)
+     * - metrics.ctr / metrics.average_cpc are NOT requested — computed on the fly with NULLIF
+     *   See PLANNING.md "ad_insights — computed columns"
      *
      * @return list<array<string, mixed>>
      *
@@ -179,8 +199,8 @@ class GoogleAdsClient
     {
         $gaql = <<<GAQL
             SELECT campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type,
-                   metrics.cost_micros, metrics.impressions, metrics.clicks, metrics.ctr,
-                   metrics.average_cpc, segments.date
+                   metrics.cost_micros, metrics.impressions, metrics.clicks,
+                   metrics.conversions, metrics.search_impression_share, segments.date
             FROM campaign
             WHERE segments.date BETWEEN '{$since}' AND '{$until}'
               AND campaign.status != 'REMOVED'
@@ -214,6 +234,13 @@ class GoogleAdsClient
             ->post($url, ['query' => $gaql]);
 
         $this->assertSuccess($response);
+
+        // Record successful call for admin quota visibility.
+        $today = now()->toDateString();
+        Cache::put('google_ads_last_success_at', now()->toISOString(), 86400);
+        $callKey = 'google_ads_calls_' . $today;
+        Cache::add($callKey, 0, 172800);
+        Cache::increment($callKey);
 
         $rows = [];
         $body = $response->body();
@@ -367,7 +394,16 @@ class GoogleAdsClient
 
         if ($status === 429 || $this->hasGoogleStatus($body, 'RESOURCE_EXHAUSTED')) {
             $retryAfter = (int) $response->header('Retry-After', 60);
-            throw new GoogleRateLimitException($retryAfter ?: 60);
+            $retryAfter = $retryAfter ?: 60;
+
+            // Record throttle event for admin visibility.
+            Cache::put('google_ads_throttled_until', now()->addSeconds($retryAfter)->toISOString(), $retryAfter + 60);
+            Cache::put('google_ads_last_throttle_at', now()->toISOString(), 86400);
+            $hitKey = 'google_ads_rate_limit_hits_' . now()->toDateString();
+            Cache::add($hitKey, 0, 172800);
+            Cache::increment($hitKey);
+
+            throw new GoogleRateLimitException($retryAfter);
         }
 
         if ($status === 401 || $this->hasGoogleStatus($body, 'UNAUTHENTICATED')) {

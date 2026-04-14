@@ -33,22 +33,25 @@ class CountriesController extends Controller
         $sortDir  = $validated['sort_dir'] ?? 'desc';
         $storeIds = $this->parseStoreIds($validated['store_ids'] ?? '', $workspaceId);
 
-        $storeClause  = ! empty($storeIds)
+        $storeClause = ! empty($storeIds)
             ? 'AND store_id IN (' . implode(',', array_map('intval', $storeIds)) . ')'
             : '';
 
-        // Aggregate revenue_by_country JSONB across selected stores (or all)
+        // Why: revenue_by_country JSONB dropped from daily_snapshots; query orders directly.
+        // shipping_country is indexed on (workspace_id, shipping_country).
+        // See: PLANNING.md "Which table to query"
         $rows = DB::select(
             "SELECT
-                kv.key                   AS country_code,
-                SUM(kv.value::numeric)   AS revenue
-            FROM daily_snapshots,
-                jsonb_each_text(revenue_by_country) AS kv
+                shipping_country                   AS country_code,
+                SUM(total_in_reporting_currency)   AS revenue
+            FROM orders
             WHERE workspace_id = ?
-              AND date BETWEEN ? AND ?
-              AND revenue_by_country IS NOT NULL
+              AND occurred_at::date BETWEEN ? AND ?
+              AND status IN ('completed', 'processing')
+              AND shipping_country IS NOT NULL
+              AND total_in_reporting_currency IS NOT NULL
               {$storeClause}
-            GROUP BY kv.key
+            GROUP BY shipping_country
             ORDER BY revenue DESC",
             [$workspaceId, $from, $to],
         );
@@ -96,7 +99,7 @@ class CountriesController extends Controller
                 FROM orders o
                 JOIN order_items oi ON oi.order_id = o.id
                 WHERE o.workspace_id = ?
-                  AND o.customer_country = ?
+                  AND o.shipping_country = ?
                   AND o.occurred_at::date BETWEEN ? AND ?
                   AND o.status IN ('completed', 'processing')
                   AND o.total_in_reporting_currency IS NOT NULL

@@ -190,7 +190,7 @@ class WooCommerceHistoricalImportJobTest extends TestCase
         $job = new WooCommerceHistoricalImportJob(99999, $this->workspace->id);
         $job->handle(app(\App\Actions\UpsertWooCommerceOrderAction::class));
 
-        // Simply verify no exception thrown and nothing changed
-        $this->assertTrue(true);
+        // Confirm no sync_log was created — the job exited before touching any state.
+        $this->assertDatabaseMissing('sync_logs', ['syncable_id' => 99999]);
     }
 }

@@ -5,6 +5,9 @@ export interface User {
     email_verified_at?: string;
     is_super_admin: boolean;
     last_login_at?: string;
+    // Per-view UI state — breakdown mode, sort, filter. Persisted via PATCH /settings/view-preferences.
+    // Shape: { [viewKey]: { view?: string, filter?: string, sort_by?: string, sort_dir?: string } }
+    view_preferences: Record<string, Record<string, string | undefined>>;
 }
 
 export interface Workspace {
@@ -16,6 +19,10 @@ export interface Workspace {
     trial_ends_at?: string;
     billing_plan?: string;
     pm_type?: string | null;
+    has_store: boolean;
+    has_ads: boolean;
+    has_gsc: boolean;
+    has_psi: boolean;
 }
 
 export interface Store {
@@ -23,6 +30,7 @@ export interface Store {
     slug: string;
     name: string;
     status: string;
+    last_synced_at: string | null;
 }
 
 export interface Alert {
@@ -67,8 +75,6 @@ export type PageProps<
     workspaces?: Workspace[];
     stores?: Store[];
     unread_alerts_count?: number;
-    has_ad_accounts?: boolean;
-    has_gsc?: boolean;
     workspace_role?: 'owner' | 'admin' | 'member' | null;
     impersonating?: boolean;
     impersonated_user_name?: string | null;

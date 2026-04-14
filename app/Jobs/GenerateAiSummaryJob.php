@@ -72,6 +72,21 @@ class GenerateAiSummaryJob implements ShouldQueue
             return;
         }
 
+        // Why: jobs queued before trial expiry must be discarded on pickup.
+        // Calling the Anthropic API for frozen workspaces incurs cost with no user benefit.
+        // Dispatch filters in console.php prevent NEW dispatches for frozen workspaces,
+        // but jobs already in the queue need this in-job guard. See PLANNING.md "14-day free trial".
+        $isFrozen = $workspace->trial_ends_at !== null
+            && $workspace->trial_ends_at->lt(now())
+            && $workspace->billing_plan === null;
+
+        if ($isFrozen) {
+            Log::info('GenerateAiSummaryJob: skipped — workspace trial expired', [
+                'workspace_id' => $this->workspaceId,
+            ]);
+            return;
+        }
+
         // Skip: no active store
         $hasActiveStore = Store::withoutGlobalScopes()
             ->where('workspace_id', $this->workspaceId)
@@ -243,6 +258,10 @@ class GenerateAiSummaryJob implements ShouldQueue
         $row = GscDailyStat::withoutGlobalScopes()
             ->where('workspace_id', $this->workspaceId)
             ->whereDate('date', $date)
+            // Why: filter to aggregate rows only to avoid inflating clicks/impressions
+            // from per-device/country breakdown rows added in Phase 0 migration.
+            ->where('device', 'all')
+            ->where('country', 'ZZ')
             ->selectRaw('
                 SUM(clicks) as clicks,
                 SUM(impressions) as impressions,

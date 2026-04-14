@@ -1,22 +1,18 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import axios from 'axios';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Head, Link, router, usePage } from '@inertiajs/react';
 import { BarChart2, Table2, Grid2X2 } from 'lucide-react';
-import {
-    BarChart as RechartsBarChart,
-    Bar,
-    XAxis,
-    YAxis,
-    CartesianGrid,
-    Tooltip,
-    ResponsiveContainer,
-} from 'recharts';
 import AppLayout from '@/Components/layouts/AppLayout';
 import { DateRangePicker } from '@/Components/shared/DateRangePicker';
 import { PageHeader } from '@/Components/shared/PageHeader';
 import { MetricCard } from '@/Components/shared/MetricCard';
-import { QuadrantChart } from '@/Components/charts/QuadrantChart';
-import { formatCurrency, formatDate, formatNumber, type Granularity } from '@/lib/formatters';
+import { CampaignsTabBar } from '@/Components/shared/CampaignsTabBar';
+import { StatusBadge } from '@/Components/shared/StatusBadge';
+import { BarChart, type BarSeriesConfig } from '@/Components/charts/BarChart';
+import { QuadrantChart, type QuadrantCampaign } from '@/Components/charts/QuadrantChart';
+import { formatCurrency, formatNumber, type Granularity } from '@/lib/formatters';
 import { cn } from '@/lib/utils';
+import { syncDotClass, syncDotTitle } from '@/lib/syncStatus';
 import type { PageProps } from '@/types';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -49,6 +45,7 @@ interface CampaignRow {
     real_cpo: number | null;
     attributed_revenue: number | null;
     attributed_orders: number;
+    spend_velocity: number | null;
 }
 
 interface PlatformBreakdownEntry {
@@ -68,18 +65,24 @@ interface AdAccountOption {
     id: number;
     platform: string;
     name: string;
+    status: string;
+    last_synced_at: string | null;
 }
 
 interface Props {
     has_ad_accounts: boolean;
     ad_accounts: AdAccountOption[];
-    ad_account_id: number | null;
+    ad_account_ids: number[];
     metrics: CampaignMetrics | null;
     compare_metrics: CampaignMetrics | null;
     campaigns: CampaignRow[];
     platform_breakdown: Record<string, PlatformBreakdownEntry>;
     chart_data: SpendChartPoint[];
     compare_chart_data: SpendChartPoint[] | null;
+    total_revenue: number | null;
+    unattributed_revenue: number | null;
+    // Workspace ROAS target for Winners/Losers chips. Null = no target set.
+    workspace_target_roas: number | null;
     from: string;
     to: string;
     compare_from: string | null;
@@ -152,23 +155,6 @@ function PlatformBadge({ platform }: { platform: string }) {
     );
 }
 
-// ─── Status badge ─────────────────────────────────────────────────────────────
-
-function StatusBadge({ status }: { status: string | null }) {
-    if (!status) return <span className="text-zinc-400">—</span>;
-    const normalized = status.toLowerCase();
-    const isActive   = ['active', 'enabled', 'delivering'].some((s) => normalized.includes(s));
-    const isPaused   = normalized.includes('paused') || normalized.includes('inactive');
-    return (
-        <span className={cn(
-            'inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium',
-            isActive ? 'bg-green-50 text-green-700' : isPaused ? 'bg-zinc-100 text-zinc-500' : 'bg-zinc-100 text-zinc-500',
-        )}>
-            {status}
-        </span>
-    );
-}
-
 // ─── Sort button ──────────────────────────────────────────────────────────────
 
 function SortButton({
@@ -188,7 +174,7 @@ function SortButton({
     return (
         <button
             onClick={() => onSort(col)}
-            className={cn('flex items-center gap-1 hover:text-zinc-700 transition-colors', active ? 'text-indigo-600' : 'text-zinc-400')}
+            className={cn('flex items-center gap-1 hover:text-zinc-700 transition-colors', active ? 'text-primary' : 'text-zinc-400')}
         >
             {label}
             {active && <span className="text-[10px]">{currentDir === 'desc' ? '↓' : '↑'}</span>}
@@ -196,7 +182,31 @@ function SortButton({
     );
 }
 
+// ─── Spend velocity badge ─────────────────────────────────────────────────────
+// velocity = (spend / budget_for_period) / (days_elapsed / days_in_period)
+// 1.0 = on pace, >1.0 = pacing fast, <1.0 = pacing slow
+
+function SpendVelocityBadge({ velocity }: { velocity: number | null }) {
+    if (velocity === null) return <span className="text-zinc-400">—</span>;
+
+    const pct     = Math.round(velocity * 100);
+    const isHigh  = velocity > 1.15;
+    const isLow   = velocity < 0.85;
+    const color   = isHigh ? 'text-amber-700' : isLow ? 'text-blue-600' : 'text-green-700';
+
+    return (
+        <span className={cn('tabular-nums font-medium', color)} title={`${pct}% of expected pacing`}>
+            {pct}%
+        </span>
+    );
+}
+
 // ─── Spend chart (multi-platform stacked) ────────────────────────────────────
+
+const SPEND_SERIES: BarSeriesConfig[] = [
+    { dataKey: 'facebook', name: 'Facebook', color: '#3b82f6', stackId: 'spend' },
+    { dataKey: 'google',   name: 'Google',   color: '#ef4444', stackId: 'spend' },
+];
 
 function SpendChart({
     chartData,
@@ -209,80 +219,28 @@ function SpendChart({
     currency: string;
     navigating: boolean;
 }) {
-    const hasFacebook = useMemo(() => chartData.some((d) => d.facebook > 0), [chartData]);
-    const hasGoogle = useMemo(() => chartData.some((d) => d.google > 0), [chartData]);
+    const activeSeries = useMemo(
+        () => SPEND_SERIES.filter((s) => chartData.some((d) => (d[s.dataKey as keyof SpendChartPoint] as number) > 0)),
+        [chartData],
+    );
 
     return (
         <div className="mb-6 rounded-xl border border-zinc-200 bg-white p-5">
-            <div className="mb-4 flex items-center justify-between">
-                <div className="text-sm font-medium text-zinc-500">Daily ad spend</div>
-                <div className="flex items-center gap-4 text-xs text-zinc-400">
-                    {hasFacebook && (
-                        <span className="flex items-center gap-1.5">
-                            <span className="h-2 w-2 rounded-full bg-blue-500" />Facebook
-                        </span>
-                    )}
-                    {hasGoogle && (
-                        <span className="flex items-center gap-1.5">
-                            <span className="h-2 w-2 rounded-full bg-red-500" />Google
-                        </span>
-                    )}
-                </div>
-            </div>
-            {navigating ? (
-                <div className="h-64 w-full animate-pulse rounded-lg bg-zinc-100" />
-            ) : chartData.length === 0 ? (
+            <div className="mb-4 text-sm font-medium text-zinc-500">Daily ad spend</div>
+            {chartData.length === 0 ? (
                 <div className="flex h-64 flex-col items-center justify-center gap-2">
                     <p className="text-sm text-zinc-400">No spend data for this period.</p>
                 </div>
             ) : (
-                <div className="h-64 w-full">
-                    <ResponsiveContainer width="100%" height="100%">
-                        <RechartsBarChart
-                            data={chartData}
-                            margin={{ top: 4, right: 8, left: 0, bottom: 0 }}
-                            barCategoryGap="30%"
-                            barGap={2}
-                        >
-                            <CartesianGrid strokeDasharray="3 3" stroke="#f4f4f5" vertical={false} />
-                            <XAxis
-                                dataKey="date"
-                                tickLine={false}
-                                axisLine={false}
-                                tick={{ fontSize: 11, fill: '#a1a1aa' }}
-                                tickFormatter={(d) => formatDate(d, granularity)}
-                                minTickGap={40}
-                            />
-                            <YAxis
-                                tickLine={false}
-                                axisLine={false}
-                                tick={{ fontSize: 11, fill: '#a1a1aa' }}
-                                tickFormatter={(v) => formatCurrency(v, currency, true)}
-                                width={60}
-                            />
-                            <Tooltip
-                                contentStyle={{
-                                    fontSize: 12,
-                                    borderRadius: 8,
-                                    border: '1px solid #e4e4e7',
-                                    boxShadow: '0 1px 8px rgba(0,0,0,0.08)',
-                                }}
-                                cursor={{ fill: '#f4f4f5' }}
-                                formatter={(value: unknown, name: unknown) => [
-                                    formatCurrency(Number(value), currency),
-                                    String(name),
-                                ]}
-                                labelFormatter={(label) => formatDate(String(label), granularity)}
-                            />
-                            {hasFacebook && (
-                                <Bar dataKey="facebook" name="Facebook" fill="#3b82f6" radius={[3, 3, 0, 0]} stackId="spend" />
-                            )}
-                            {hasGoogle && (
-                                <Bar dataKey="google" name="Google" fill="#ef4444" radius={[3, 3, 0, 0]} stackId="spend" />
-                            )}
-                        </RechartsBarChart>
-                    </ResponsiveContainer>
-                </div>
+                <BarChart
+                    data={chartData}
+                    granularity={granularity}
+                    currency={currency}
+                    valueType="currency"
+                    series={activeSeries}
+                    loading={navigating}
+                    className="h-64 w-full"
+                />
             )}
         </div>
     );
@@ -296,12 +254,16 @@ function CampaignTable({
     sort,
     direction,
     onSort,
+    from,
+    to,
 }: {
     campaigns: CampaignRow[];
     currency: string;
     sort: string;
     direction: 'asc' | 'desc';
     onSort: (col: string) => void;
+    from: string;
+    to: string;
 }) {
     const sortBtn = (col: string, label: string) => (
         <SortButton col={col} label={label} currentSort={sort} currentDir={direction} onSort={onSort} />
@@ -329,6 +291,10 @@ function CampaignTable({
                 <div className="overflow-x-auto">
                     <table className="w-full text-sm">
                         <thead>
+                            {/* Platform ROAS is adjacent to Real ROAS so the contrast is immediately visible.
+                                This side-by-side comparison is the primary trust-building moment:
+                                "Facebook says 4.2× / Store says 2.8×" on the same row.
+                                See: PLANNING.md "Platform ROAS vs Real ROAS" */}
                             <tr className="text-left text-xs font-medium uppercase tracking-wide text-zinc-400">
                                 <th className="px-5 py-3">Campaign</th>
                                 <th className="px-5 py-3">Platform</th>
@@ -336,8 +302,22 @@ function CampaignTable({
                                 <th className="px-5 py-3 text-right">
                                     {sortBtn('spend', 'Spend')}
                                 </th>
+                                {/* Platform ROAS next to Real ROAS — the visual contrast is the point */}
                                 <th className="px-5 py-3 text-right">
-                                    <span title="UTM-attributed revenue ÷ ad spend">
+                                    <span className="inline-flex items-center gap-1">
+                                        Platform ROAS
+                                        <a
+                                            href="/help/data-accuracy#roas"
+                                            className="text-zinc-300 hover:text-zinc-500 transition-colors"
+                                            title="What Meta/Google report using pixel-based attribution. Typically higher than Real ROAS due to iOS14+ modeled conversions and cross-platform double-counting."
+                                            onClick={(e) => e.stopPropagation()}
+                                        >
+                                            ⓘ
+                                        </a>
+                                    </span>
+                                </th>
+                                <th className="px-5 py-3 text-right">
+                                    <span title="UTM-attributed revenue ÷ ad spend. Calculated from your actual orders, not platform pixel attribution. Requires UTM parameters on your ad links.">
                                         {sortBtn('real_roas', 'Real ROAS')}
                                     </span>
                                 </th>
@@ -350,39 +330,59 @@ function CampaignTable({
                                     {sortBtn('attributed_revenue', 'Attr. Revenue')}
                                 </th>
                                 <th className="px-5 py-3 text-right">Attr. Orders</th>
+                                <th className="px-5 py-3 text-right">
+                                    <span title="Spend velocity: how fast this campaign is burning through its budget vs expected daily pace. 100% = on pace. Requires a daily or lifetime budget set on the campaign.">
+                                        {sortBtn('spend_velocity', 'Velocity')}
+                                    </span>
+                                </th>
                                 <th className="px-5 py-3 text-right">Impressions</th>
                                 <th className="px-5 py-3 text-right">Clicks</th>
                                 <th className="px-5 py-3 text-right">CTR</th>
                                 <th className="px-5 py-3 text-right">CPC</th>
-                                <th className="px-5 py-3 text-right">
-                                    <span title="Platform-reported ROAS (pixel-based)">Platform ROAS</span>
-                                </th>
+                                <th className="px-5 py-3 text-right">Drill →</th>
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-zinc-100">
                             {campaigns.map((c) => (
                                 <tr key={c.id} className="hover:bg-zinc-50">
                                     <td className="max-w-[200px] px-5 py-3">
-                                        <span className="block truncate font-medium text-zinc-800" title={c.name}>
+                                        <Link
+                                            href={`/campaigns/adsets?campaign_id=${c.id}&from=${from}&to=${to}`}
+                                            className="block truncate font-medium text-zinc-800 hover:text-primary transition-colors"
+                                            title={c.name}
+                                        >
                                             {c.name || '—'}
-                                        </span>
+                                        </Link>
                                     </td>
                                     <td className="px-5 py-3">
                                         <PlatformBadge platform={c.platform} />
                                     </td>
                                     <td className="px-5 py-3">
-                                        <StatusBadge status={c.status} />
+                                        {c.status ? <StatusBadge status={c.status} /> : <span className="text-zinc-400">—</span>}
                                     </td>
                                     <td className="px-5 py-3 text-right tabular-nums text-zinc-700">
                                         {c.spend > 0 ? formatCurrency(c.spend, currency) : 'N/A'}
                                     </td>
+                                    {/* Platform ROAS — shown in muted blue to distinguish from Real ROAS.
+                                        Adjacent columns make the gap between platform-reported and store-verified
+                                        ROAS immediately visible without needing a tooltip. */}
+                                    <td className="px-5 py-3 text-right tabular-nums">
+                                        {c.platform_roas != null ? (
+                                            <span className="text-blue-600 font-medium">
+                                                {c.platform_roas.toFixed(2)}×
+                                            </span>
+                                        ) : (
+                                            <span className="text-zinc-400">—</span>
+                                        )}
+                                    </td>
+                                    {/* Real ROAS — green/red based on ≥1×. Adjacent to Platform ROAS for contrast. */}
                                     <td className="px-5 py-3 text-right tabular-nums font-medium">
                                         {c.real_roas != null ? (
                                             <span className={c.real_roas >= 1 ? 'text-green-700' : 'text-red-600'}>
                                                 {c.real_roas.toFixed(2)}×
                                             </span>
                                         ) : (
-                                            <span className="text-zinc-400">—</span>
+                                            <span className="text-zinc-400" title="No UTM-matched orders — add UTM parameters to your ad links to enable Real ROAS tracking.">—</span>
                                         )}
                                     </td>
                                     <td className="px-5 py-3 text-right tabular-nums text-zinc-700">
@@ -393,6 +393,9 @@ function CampaignTable({
                                     </td>
                                     <td className="px-5 py-3 text-right tabular-nums text-zinc-700">
                                         {c.attributed_orders > 0 ? formatNumber(c.attributed_orders) : <span className="text-zinc-400">—</span>}
+                                    </td>
+                                    <td className="px-5 py-3 text-right">
+                                        <SpendVelocityBadge velocity={c.spend_velocity} />
                                     </td>
                                     <td className="px-5 py-3 text-right tabular-nums text-zinc-700">
                                         {formatNumber(c.impressions)}
@@ -406,8 +409,14 @@ function CampaignTable({
                                     <td className="px-5 py-3 text-right tabular-nums text-zinc-700">
                                         {c.cpc != null ? formatCurrency(c.cpc, currency) : 'N/A'}
                                     </td>
-                                    <td className="px-5 py-3 text-right tabular-nums text-zinc-500">
-                                        {c.platform_roas != null ? `${c.platform_roas.toFixed(2)}×` : 'N/A'}
+                                    <td className="px-5 py-3 text-right">
+                                        <Link
+                                            href={`/campaigns/adsets?campaign_id=${c.id}&from=${from}&to=${to}`}
+                                            className="text-xs text-zinc-400 hover:text-primary transition-colors"
+                                            title="View ad sets for this campaign"
+                                        >
+                                            Ad Sets →
+                                        </Link>
                                     </td>
                                 </tr>
                             ))}
@@ -422,17 +431,20 @@ function CampaignTable({
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 export default function CampaignsIndex(props: Props) {
-    const { workspace } = usePage<PageProps>().props;
+    const { workspace, auth } = usePage<PageProps>().props;
     const currency = workspace?.reporting_currency ?? 'EUR';
 
     const {
         has_ad_accounts,
         ad_accounts,
-        ad_account_id,
+        ad_account_ids,
         metrics,
         compare_metrics,
         campaigns,
         chart_data,
+        total_revenue,
+        unattributed_revenue,
+        workspace_target_roas,
         from,
         to,
         compare_from,
@@ -446,6 +458,45 @@ export default function CampaignsIndex(props: Props) {
     } = props;
 
     const [navigating, setNavigating] = useState(false);
+
+    // ── Quadrant ROAS type toggle — local state, no server round-trip needed ──
+    // Both real_roas and platform_roas are already in the campaign rows.
+    const [roasType, setRoasType] = useState<'real' | 'platform'>('real');
+
+    // ── Winners / Losers filter ──────────────────────────────────────────────
+    // Restored from view_preferences on mount; URL ?filter param takes priority
+    // (used by sidebar "Winners / Losers" deep-links). Persisted on change.
+    // Winners = real_roas >= threshold (workspace target or 1.0 break-even fallback).
+    // See: PLANNING.md "Winners/Losers" filter chips
+    const urlFilter = typeof window !== 'undefined'
+        ? (new URLSearchParams(window.location.search).get('filter') ?? null)
+        : null;
+    const savedFilter = (urlFilter ?? auth.user?.view_preferences?.campaigns?.filter ?? 'all') as 'all' | 'winners' | 'losers';
+    const [roasFilter, setRoasFilter] = useState<'all' | 'winners' | 'losers'>(savedFilter);
+    const filterPersistTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    function setRoasFilterAndPersist(f: 'all' | 'winners' | 'losers') {
+        setRoasFilter(f);
+        if (filterPersistTimeout.current) clearTimeout(filterPersistTimeout.current);
+        filterPersistTimeout.current = setTimeout(() => {
+            axios.patch('/settings/view-preferences', {
+                preferences: { campaigns: { filter: f } },
+            }).catch(() => {});
+        }, 400);
+    }
+
+    // Threshold: workspace target, or 1.0× break-even if no target is set.
+    const roasThreshold = workspace_target_roas ?? 1.0;
+
+    const filteredCampaigns = useMemo(() => {
+        if (roasFilter === 'all') return campaigns;
+        return campaigns.filter(c => {
+            // Zero-spend campaigns are dormant, not losers — exclude from losers filter
+            if (roasFilter === 'losers' && !c.spend) return false;
+            if (c.real_roas === null) return roasFilter === 'losers'; // null ROAS = no attribution = loser
+            return roasFilter === 'winners' ? c.real_roas >= roasThreshold : c.real_roas < roasThreshold;
+        });
+    }, [campaigns, roasFilter, roasThreshold]);
 
     useEffect(() => {
         const off1 = router.on('start',  () => setNavigating(true));
@@ -463,27 +514,31 @@ export default function CampaignsIndex(props: Props) {
     // ── Param helpers ────────────────────────────────────────────────────────
     const currentParams = useMemo(() => ({
         from, to,
-        ...(compare_from    ? { compare_from }                      : {}),
-        ...(compare_to      ? { compare_to }                        : {}),
-        ...(ad_account_id   ? { ad_account_id: String(ad_account_id) } : {}),
+        ...(compare_from              ? { compare_from }                              : {}),
+        ...(compare_to                ? { compare_to }                                : {}),
+        ...(ad_account_ids.length > 0 ? { ad_account_ids: ad_account_ids.join(',') } : {}),
         granularity,
         platform,
         status,
         view,
         sort,
         direction,
-    }), [from, to, compare_from, compare_to, ad_account_id, granularity, platform, status, view, sort, direction]);
+    }), [from, to, compare_from, compare_to, ad_account_ids, granularity, platform, status, view, sort, direction]);
 
     function setPlatform(v: 'all' | 'facebook' | 'google') {
-        // Clear ad account filter when switching platforms — the account may not belong to the new platform
-        navigate({ ...currentParams, platform: v, ad_account_id: undefined });
+        // Clear ad account filter when switching platforms
+        const { ad_account_ids: _removed, ...rest } = currentParams;
+        navigate({ ...rest, platform: v });
     }
     function setStatus(v: 'all' | 'active' | 'paused') {
         navigate({ ...currentParams, status: v });
     }
-    function setAdAccount(id: number | null) {
-        const { ad_account_id: _removed, ...rest } = currentParams;
-        navigate(id !== null ? { ...rest, ad_account_id: String(id) } : rest);
+    function toggleAdAccount(id: number) {
+        const next = ad_account_ids.includes(id)
+            ? ad_account_ids.filter((x) => x !== id)
+            : [...ad_account_ids, id];
+        const { ad_account_ids: _removed, ...rest } = currentParams;
+        navigate(next.length > 0 ? { ...rest, ad_account_ids: next.join(',') } : rest);
     }
     function setView(v: 'table' | 'quadrant') {
         navigate({ ...currentParams, view: v });
@@ -499,6 +554,7 @@ export default function CampaignsIndex(props: Props) {
             <AppLayout dateRangePicker={<DateRangePicker />}>
                 <Head title="Campaigns" />
                 <PageHeader title="Campaigns" subtitle="Cross-platform ad performance" />
+                <CampaignsTabBar />
                 <div className="flex flex-col items-center justify-center rounded-xl border border-zinc-200 bg-white px-6 py-20 text-center">
                     <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-zinc-100">
                         <BarChart2 className="h-6 w-6 text-zinc-400" />
@@ -509,7 +565,7 @@ export default function CampaignsIndex(props: Props) {
                     </p>
                     <Link
                         href="/settings/integrations"
-                        className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
+                        className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
                     >
                         Connect ad accounts →
                     </Link>
@@ -522,6 +578,54 @@ export default function CampaignsIndex(props: Props) {
         <AppLayout dateRangePicker={<DateRangePicker />}>
             <Head title="Campaigns" />
             <PageHeader title="Campaigns" subtitle="Cross-platform ad performance" />
+            <CampaignsTabBar />
+
+            {/* ── Ad account pills — one row per platform ── */}
+            {(['facebook', 'google'] as const).map((plat) => {
+                const accounts = ad_accounts.filter((a) => a.platform === plat);
+                if (accounts.length === 0) return null;
+                return (
+                    <div key={plat} className="mb-3 flex flex-wrap items-center gap-2">
+                        <span className="text-xs font-medium text-zinc-400 shrink-0">
+                            {plat === 'facebook' ? 'Facebook' : 'Google'}
+                        </span>
+                        {accounts.length > 1 && (
+                            <button
+                                onClick={() => {
+                                    // Deselect all accounts for this platform
+                                    const otherIds = ad_account_ids.filter((id) => !accounts.some((a) => a.id === id));
+                                    const { ad_account_ids: _r, ...rest } = currentParams;
+                                    navigate(otherIds.length > 0 ? { ...rest, ad_account_ids: otherIds.join(',') } : rest);
+                                }}
+                                className={cn(
+                                    'rounded-full border px-3 py-1 text-xs font-medium transition-colors',
+                                    accounts.every((a) => !ad_account_ids.includes(a.id))
+                                        ? 'border-primary bg-primary/10 text-primary'
+                                        : 'border-zinc-200 bg-white text-zinc-600 hover:border-zinc-300',
+                                )}
+                            >
+                                All
+                            </button>
+                        )}
+                        {accounts.map((a) => (
+                            <button
+                                key={a.id}
+                                onClick={() => toggleAdAccount(a.id)}
+                                className={cn(
+                                    'flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition-colors',
+                                    ad_account_ids.includes(a.id)
+                                        ? 'border-primary bg-primary/10 text-primary'
+                                        : 'border-zinc-200 bg-white text-zinc-600 hover:border-zinc-300',
+                                )}
+                                title={`${a.name} — ${syncDotTitle(a.status, a.last_synced_at)}`}
+                            >
+                                <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', syncDotClass(a.status, a.last_synced_at))} />
+                                {a.name}
+                            </button>
+                        ))}
+                    </div>
+                );
+            })}
 
             {/* ── Filter bar ── */}
             <div className="mb-6 flex flex-wrap items-center gap-3">
@@ -534,22 +638,6 @@ export default function CampaignsIndex(props: Props) {
                     value={platform}
                     onChange={setPlatform}
                 />
-                {ad_accounts.length > 1 && (
-                    <select
-                        value={ad_account_id ?? ''}
-                        onChange={(e) => setAdAccount(e.target.value ? Number(e.target.value) : null)}
-                        className="rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-xs font-medium text-zinc-600 focus:outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer"
-                    >
-                        <option value="">All accounts</option>
-                        {ad_accounts
-                            .filter((a) => platform === 'all' || a.platform === platform)
-                            .map((a) => (
-                                <option key={a.id} value={a.id}>
-                                    {a.platform === 'facebook' ? 'FB' : 'G'}: {a.name}
-                                </option>
-                            ))}
-                    </select>
-                )}
                 <ToggleGroup
                     options={[
                         { label: 'All status', value: 'all' },
@@ -582,7 +670,64 @@ export default function CampaignsIndex(props: Props) {
                         <Grid2X2 className="h-4 w-4" />
                     </button>
                 </div>
+
+                {/* Winners / Losers chips — visible in both table and quadrant view.
+                    Real ROAS ≥ target (or ≥ 1× break-even). Persisted to view_preferences. See: PLANNING.md "Winners/Losers" */}
+                <div className="flex items-center gap-1">
+                    {(['all', 'winners', 'losers'] as const).map(f => (
+                        <button
+                            key={f}
+                            onClick={() => setRoasFilterAndPersist(f)}
+                            className={cn(
+                                'rounded-full border px-3 py-1 text-xs font-medium transition-colors',
+                                roasFilter === f
+                                    ? f === 'winners'
+                                        ? 'border-green-300 bg-green-50 text-green-700'
+                                        : f === 'losers'
+                                        ? 'border-red-300 bg-red-50 text-red-700'
+                                        : 'border-primary bg-primary/10 text-primary'
+                                    : 'border-zinc-200 text-zinc-500 hover:border-zinc-300 hover:text-zinc-700',
+                            )}
+                            title={
+                                f === 'winners'
+                                    ? `Real ROAS ≥ ${roasThreshold.toFixed(2)}×`
+                                    : f === 'losers'
+                                    ? `Real ROAS < ${roasThreshold.toFixed(2)}×`
+                                    : 'Show all campaigns'
+                            }
+                        >
+                            {f === 'all' ? 'All' : f === 'winners' ? '🏆 Winners' : '📉 Losers'}
+                        </button>
+                    ))}
+                    {roasFilter !== 'all' && (
+                        <span className="text-xs text-zinc-400">
+                            {filteredCampaigns.length} / {campaigns.length}
+                        </span>
+                    )}
+                </div>
             </div>
+
+            {/* ── Revenue context cards (only when store is connected) ── */}
+            {/* Why: these cards give the Platform ROAS vs Real ROAS contrast its context.
+                Without seeing total store revenue next to ad-attributed revenue, the gap is invisible. */}
+            {(total_revenue !== null || unattributed_revenue !== null) && (
+                <div className="mb-4 grid grid-cols-2 gap-4">
+                    <MetricCard
+                        label="Total Store Revenue"
+                        source="store"
+                        value={total_revenue !== null ? formatCurrency(total_revenue, currency) : null}
+                        loading={navigating}
+                        tooltip="Total revenue from your store for the selected period, from daily snapshots."
+                    />
+                    <MetricCard
+                        label="Not Tracked Revenue"
+                        source="real"
+                        value={unattributed_revenue !== null ? formatCurrency(unattributed_revenue, currency) : null}
+                        loading={navigating}
+                        tooltip="Revenue not tracked by any ad platform. Includes organic search, direct, email campaigns (Klaviyo, Mailchimp), affiliates, and any other untagged traffic. When negative, platforms over-reported — usually due to iOS14+ modeled conversions. To see email revenue separately, add utm_medium=email to your email campaigns."
+                    />
+                </div>
+            )}
 
             {/* ── Metric cards ── */}
             <div className="mb-6 grid grid-cols-2 gap-4 sm:grid-cols-4">
@@ -591,7 +736,7 @@ export default function CampaignsIndex(props: Props) {
                     value={metrics?.roas != null ? `${metrics.roas.toFixed(2)}×` : null}
                     change={changes.roas}
                     loading={navigating}
-                    tooltip="Blended Return On Ad Spend. Total store revenue divided by total ad spend across all platforms — not limited to UTM-attributed orders."
+                    tooltip="Blended Return On Ad Spend. Total store revenue (from daily snapshots) divided by total ad spend across all platforms. Not limited to UTM-attributed orders — use Real ROAS per campaign for UTM-matched attribution."
                 />
                 <MetricCard
                     label="CPO"
@@ -632,30 +777,78 @@ export default function CampaignsIndex(props: Props) {
                         navigating={navigating}
                     />
                     <CampaignTable
-                        campaigns={campaigns}
+                        campaigns={filteredCampaigns}
                         currency={currency}
                         sort={sort}
                         direction={direction}
                         onSort={setSort}
+                        from={from}
+                        to={to}
                     />
                 </>
             )}
 
             {/* ── Quadrant view ── */}
-            {view === 'quadrant' && (
-                <div className="rounded-xl border border-zinc-200 bg-white p-5">
-                    <div className="mb-2 text-sm font-medium text-zinc-500">Performance quadrant</div>
-                    <p className="mb-5 text-xs text-zinc-400">
-                        Each bubble is one campaign. X = ad spend, Y = real ROAS, bubble size = attributed revenue.
-                        Campaigns without UTM attribution appear at ROAS = 0.
-                    </p>
-                    {navigating ? (
-                        <div className="h-[460px] w-full animate-pulse rounded-lg bg-zinc-100" />
-                    ) : (
-                        <QuadrantChart campaigns={campaigns} currency={currency} targetRoas={1.5} />
-                    )}
-                </div>
-            )}
+            {view === 'quadrant' && (() => {
+                // Filter out campaigns with no ROAS signal — quadrant needs a Y value to be useful.
+                // They're still visible in the table view.
+                const allMapped: QuadrantCampaign[] = filteredCampaigns.map(c => ({
+                    id:                 c.id,
+                    name:               c.name,
+                    platform:           c.platform,
+                    spend:              c.spend,
+                    real_roas:          roasType === 'real' ? c.real_roas : c.platform_roas,
+                    attributed_revenue: roasType === 'real' ? c.attributed_revenue : null,
+                    attributed_orders:  roasType === 'real' ? c.attributed_orders  : 0,
+                }));
+                const quadrantData = allMapped.filter(c => c.real_roas !== null);
+                const hiddenCount  = allMapped.length - quadrantData.length;
+                return (
+                    <div className="rounded-xl border border-zinc-200 bg-white p-5">
+                        <div className="mb-3 flex items-center justify-between">
+                            <div>
+                                <div className="text-sm font-medium text-zinc-500">Performance quadrant</div>
+                                <p className="mt-0.5 text-xs text-zinc-400">
+                                    Each bubble is one campaign. X = ad spend (log), Y = ROAS, bubble size = attributed revenue.
+                                </p>
+                            </div>
+                            {/* ROAS source toggle — Real uses UTM attribution; Platform uses ad platform's own reporting */}
+                            <div className="inline-flex rounded-lg border border-zinc-200 bg-zinc-50 p-0.5 shrink-0">
+                                <button
+                                    onClick={() => setRoasType('real')}
+                                    className={cn(
+                                        'rounded-md px-3 py-1.5 text-xs font-medium transition-colors',
+                                        roasType === 'real' ? 'bg-white text-zinc-900 shadow-sm' : 'text-zinc-400 hover:text-zinc-600',
+                                    )}
+                                >
+                                    Real ROAS
+                                </button>
+                                <button
+                                    onClick={() => setRoasType('platform')}
+                                    className={cn(
+                                        'rounded-md px-3 py-1.5 text-xs font-medium transition-colors',
+                                        roasType === 'platform' ? 'bg-white text-zinc-900 shadow-sm' : 'text-zinc-400 hover:text-zinc-600',
+                                    )}
+                                >
+                                    Platform ROAS
+                                </button>
+                            </div>
+                        </div>
+                        {navigating ? (
+                            <div className="h-[460px] w-full animate-pulse rounded-lg bg-zinc-100" />
+                        ) : (
+                            <QuadrantChart
+                                campaigns={quadrantData}
+                                currency={currency}
+                                targetRoas={workspace_target_roas ?? 1.5}
+                                yLabel={roasType === 'real' ? 'Real ROAS' : 'Platform ROAS'}
+                                hiddenCount={hiddenCount}
+                                hiddenLabel="campaigns"
+                            />
+                        )}
+                    </div>
+                );
+            })()}
         </AppLayout>
     );
 }

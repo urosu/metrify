@@ -148,25 +148,10 @@ class ComputeDailySnapshotJobTest extends TestCase
         $this->assertSame(1, $snapshot->returning_customers);
     }
 
-    public function test_revenue_by_country_aggregated(): void
+    public function test_top_products_written_to_daily_snapshot_products(): void
     {
-        $this->insertOrder(['customer_country' => 'DE', 'total_in_reporting_currency' => 200.00]);
-        $this->insertOrder(['customer_country' => 'DE', 'total_in_reporting_currency' => 100.00]);
-        $this->insertOrder(['customer_country' => 'AT', 'total_in_reporting_currency' => 50.00]);
-
-        $this->runJob();
-
-        $snapshot = DailySnapshot::withoutGlobalScopes()->where('store_id', $this->store->id)->first();
-        $byCountry = $snapshot->revenue_by_country;
-
-        $this->assertEqualsWithDelta(300.00, $byCountry['DE'], 0.01);
-        $this->assertEqualsWithDelta(50.00, $byCountry['AT'], 0.01);
-    }
-
-    public function test_top_products_limited_to_10(): void
-    {
-        // Insert 12 orders each with a different product via order_items
-        for ($i = 1; $i <= 12; $i++) {
+        // Insert 52 orders each with a different product — job should cap at top 50
+        for ($i = 1; $i <= 52; $i++) {
             $extId = uniqid('order-', true);
             DB::table('orders')->insert([
                 'workspace_id'                => $this->workspace->id,
@@ -187,10 +172,9 @@ class ComputeDailySnapshotJobTest extends TestCase
             ]);
             $orderId = DB::table('orders')->latest('id')->value('id');
 
+            // workspace_id and store_id intentionally omitted — dropped from order_items
             DB::table('order_items')->insert([
                 'order_id'            => $orderId,
-                'workspace_id'        => $this->workspace->id,
-                'store_id'            => $this->store->id,
                 'product_external_id' => "prod-{$i}",
                 'product_name'        => "Product {$i}",
                 'quantity'            => 1,
@@ -203,8 +187,17 @@ class ComputeDailySnapshotJobTest extends TestCase
 
         $this->runJob();
 
-        $snapshot = DailySnapshot::withoutGlobalScopes()->where('store_id', $this->store->id)->first();
-        $this->assertCount(10, $snapshot->top_products);
+        $productRows = DB::table('daily_snapshot_products')
+            ->where('store_id', $this->store->id)
+            ->where('snapshot_date', $this->date->toDateString())
+            ->get();
+
+        // Capped at 50, not 52
+        $this->assertCount(50, $productRows);
+
+        // Ranked 1..50
+        $ranks = $productRows->pluck('rank')->sort()->values()->all();
+        $this->assertSame(range(1, 50), $ranks);
     }
 
     public function test_idempotent_upsert(): void

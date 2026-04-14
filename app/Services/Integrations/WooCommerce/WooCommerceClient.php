@@ -76,21 +76,21 @@ class WooCommerceClient
     }
 
     /**
-     * Register order webhooks for the given store.
+     * Register order and product webhooks for the given store.
      *
-     * Creates three webhooks (order.created, order.updated, order.deleted) pointing
-     * to `{APP_URL}/api/webhooks/woocommerce/{storeId}`. The caller-supplied
-     * $webhookSecret is passed to WooCommerce so both sides share it for HMAC
-     * verification (X-WC-Webhook-Signature).
+     * Creates four webhooks (order.created, order.updated, order.deleted,
+     * product.updated) pointing to `{APP_URL}/api/webhooks/woocommerce/{storeId}`.
+     * The caller-supplied $webhookSecret is passed to WooCommerce so both sides
+     * share it for HMAC verification (X-WC-Webhook-Signature).
      *
      * @return array<string, int>  Map of event name → WooCommerce webhook ID.
-     *                             e.g. ["order.created" => 42, "order.updated" => 43, "order.deleted" => 44]
+     *                             e.g. ["order.created" => 42, ..., "product.updated" => 45]
      *
      * @throws WooCommerceConnectionException On API failure for any event.
      */
     public function registerWebhooks(int $storeId, string $webhookSecret): array
     {
-        $events     = ['order.created', 'order.updated', 'order.deleted'];
+        $events     = ['order.created', 'order.updated', 'order.deleted', 'product.updated'];
         $appUrl     = rtrim((string) config('app.url'), '/');
         $deliveryUrl = "{$appUrl}/api/webhooks/woocommerce/{$storeId}";
         $webhookIds  = [];
@@ -268,11 +268,14 @@ class WooCommerceClient
             }
 
             $response = $this->httpLong()->get($this->baseUrl() . '/orders', [
-                'orderby'  => 'modified',
-                'order'    => 'desc',
-                'per_page' => 100,
-                'after'    => $modifiedAfter,
-                'page'     => $page,
+                'orderby'        => 'modified',
+                'order'          => 'desc',
+                'per_page'       => 100,
+                // Why: 'after' filters by date_created, not date_modified.
+                // 'modified_after' (WooCommerce 3.7+) is required to catch orders
+                // that existed before the import but were updated (status change, refund, etc.).
+                'modified_after' => $modifiedAfter,
+                'page'           => $page,
             ]);
 
             if ($response->status() === 429) {
@@ -343,6 +346,41 @@ class WooCommerceClient
             'products'    => $response->json() ?? [],
             'total_pages' => (int) $response->header('X-WP-TotalPages', 1),
         ];
+    }
+
+    // -------------------------------------------------------------------------
+    // Refund fetching
+    // -------------------------------------------------------------------------
+
+    /**
+     * Fetch all refunds for a single WooCommerce order.
+     *
+     * Calls GET /orders/{orderId}/refunds and returns the full list of refund
+     * objects including date_created_gmt, amount, reason, refunded_by, and line_items.
+     *
+     * @return array<int, array<string, mixed>>
+     *
+     * @throws WooCommerceRateLimitException  On HTTP 429.
+     * @throws WooCommerceConnectionException On any other API failure.
+     */
+    public function fetchRefundsForOrder(string $orderId): array
+    {
+        $response = $this->httpLong()->get($this->baseUrl() . "/orders/{$orderId}/refunds", [
+            'per_page' => 100,
+        ]);
+
+        if ($response->status() === 429) {
+            $retryAfter = (int) $response->header('Retry-After', 60);
+            throw new WooCommerceRateLimitException($retryAfter);
+        }
+
+        if ($response->failed()) {
+            throw new WooCommerceConnectionException(
+                "Failed to fetch refunds for order {$orderId} from {$this->domain}: HTTP {$response->status()}."
+            );
+        }
+
+        return $response->json() ?? [];
     }
 
     // -------------------------------------------------------------------------

@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace App\Http\Controllers;
 
 use App\Actions\UpdateStoreAction;
+use App\Jobs\RunLighthouseCheckJob;
 use App\Models\DailyNote;
+use App\Models\LighthouseSnapshot;
 use App\Models\DailySnapshot;
 use App\Models\GscDailyStat;
 use App\Models\GscPage;
@@ -14,7 +16,10 @@ use App\Models\HourlySnapshot;
 use App\Models\Order;
 use App\Models\SearchConsoleProperty;
 use App\Models\Store;
+use App\Models\StoreUrl;
+use App\Models\Workspace;
 use App\Services\WorkspaceContext;
+use Carbon\Carbon;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -27,6 +32,8 @@ class StoreController extends Controller
     {
         $workspaceId = app(WorkspaceContext::class)->id();
 
+        $workspace = Workspace::withoutGlobalScopes()->find($workspaceId);
+
         $stores = Store::withoutGlobalScopes()
             ->where('workspace_id', $workspaceId)
             ->select([
@@ -34,8 +41,54 @@ class StoreController extends Controller
                 'last_synced_at', 'historical_import_status',
             ])
             ->orderBy('created_at')
+            ->get();
+
+        // Last 30-day revenue per store + workspace-level ad spend — used for Winners/Losers chips.
+        //
+        // Winners = stores whose marketing % (workspace ad spend / store revenue) is below the
+        // workspace target_marketing_pct. Losers = above target.
+        //
+        // Why workspace-level ad spend: ad_insights has no store_id, so spend is attributable
+        // only at the workspace level. For single-store workspaces this is exact; for multi-store
+        // workspaces it is approximate (total spend divided by each store's individual revenue).
+        //
+        // Why gate on target_marketing_pct: "Winners/Losers" is meaningless without a benchmark.
+        // If the target is null, the chips are hidden entirely.
+        //
+        // See: PLANNING.md "Winners/Losers" — /stores chip
+        $to   = now()->toDateString();
+        $from = now()->subDays(29)->toDateString();
+
+        $revenueRows = DB::table('daily_snapshots')
+            ->where('workspace_id', $workspaceId)
+            ->whereIn('store_id', $stores->pluck('id'))
+            ->whereBetween('date', [$from, $to])
+            ->select(['store_id', DB::raw('SUM(revenue) as revenue')])
+            ->groupBy('store_id')
             ->get()
-            ->map(fn ($s) => [
+            ->keyBy('store_id');
+
+        // Workspace-level ad spend for the same 30-day window.
+        // Only campaign-level rows (no hour) to avoid double-counting.
+        $workspaceAdSpend = (float) DB::table('ad_insights')
+            ->where('workspace_id', $workspaceId)
+            ->where('level', 'campaign')
+            ->whereNull('hour')
+            ->whereBetween('date', [$from, $to])
+            ->sum('spend_in_reporting_currency');
+
+        $storeList = $stores->map(function ($s) use ($revenueRows, $workspaceAdSpend) {
+            $revenue30d = isset($revenueRows[$s->id])
+                ? (float) $revenueRows[$s->id]->revenue
+                : null;
+
+            // marketing_pct = workspace ad spend / this store's revenue × 100
+            // Null when revenue is zero or unknown (no snapshot data yet).
+            $marketingPct = ($revenue30d !== null && $revenue30d > 0 && $workspaceAdSpend > 0)
+                ? round($workspaceAdSpend / $revenue30d * 100, 1)
+                : null;
+
+            return [
                 'id'                       => $s->id,
                 'slug'                     => $s->slug,
                 'name'                     => $s->name,
@@ -46,10 +99,16 @@ class StoreController extends Controller
                 'timezone'                 => $s->timezone,
                 'last_synced_at'           => $s->last_synced_at?->toISOString(),
                 'historical_import_status' => $s->historical_import_status,
-            ]);
+                'revenue_30d'              => $revenue30d,
+                'marketing_pct'            => $marketingPct,
+            ];
+        });
 
         return Inertia::render('Stores/Index', [
-            'stores' => $stores,
+            'stores'                       => $storeList,
+            'workspace_target_marketing_pct' => $workspace->target_marketing_pct
+                ? (float) $workspace->target_marketing_pct
+                : null,
         ]);
     }
 
@@ -109,31 +168,79 @@ class StoreController extends Controller
         $from      = $validated['from'] ?? now()->subDays(29)->toDateString();
         $to        = $validated['to']   ?? now()->toDateString();
 
-        // Aggregate top_products JSONB across daily_snapshots for the period
+        // Why: top_products JSONB dropped from daily_snapshots; query normalized table instead.
+        // See: PLANNING.md "daily_snapshot_products"
+        // Related: app/Jobs/ComputeDailySnapshotJob.php (writes this table)
+        //
+        // Previous period = same length, immediately before $from.
+        // If the earliest snapshot falls after $compareFrom, deltas are returned as NULL
+        // (PLANNING.md: "if compare_from falls before earliest_date, return null for deltas").
+        $periodDays  = Carbon::parse($from)->diffInDays(Carbon::parse($to)) + 1;
+        $compareTo   = Carbon::parse($from)->subDay()->toDateString();
+        $compareFrom = Carbon::parse($compareTo)->subDays($periodDays - 1)->toDateString();
+
         $products = DB::select(
-            "SELECT
-                elem->>'external_id'              AS external_id,
-                MAX(elem->>'name')                AS name,
-                SUM((elem->>'units')::int)        AS units,
-                SUM((elem->>'revenue')::numeric)  AS revenue
-            FROM daily_snapshots,
-                jsonb_array_elements(top_products) AS elem
-            WHERE store_id = ?
-              AND date BETWEEN ? AND ?
-              AND top_products IS NOT NULL
-            GROUP BY elem->>'external_id'
-            ORDER BY revenue DESC
+            "WITH current_p AS (
+                SELECT product_external_id,
+                       MAX(product_name) AS name,
+                       SUM(units)::int   AS units,
+                       SUM(revenue)      AS revenue
+                FROM daily_snapshot_products
+                WHERE store_id = ?
+                  AND snapshot_date BETWEEN ? AND ?
+                GROUP BY product_external_id
+            ),
+            prev_p AS (
+                SELECT product_external_id,
+                       SUM(units)::int AS prev_units,
+                       SUM(revenue)    AS prev_revenue
+                FROM daily_snapshot_products
+                WHERE store_id = ?
+                  AND snapshot_date BETWEEN ? AND ?
+                GROUP BY product_external_id
+            ),
+            earliest AS (
+                SELECT MIN(snapshot_date) AS earliest_date
+                FROM daily_snapshot_products
+                WHERE store_id = ?
+            )
+            SELECT
+                c.product_external_id AS external_id,
+                c.name,
+                c.units,
+                c.revenue,
+                CASE
+                    WHEN e.earliest_date IS NULL OR e.earliest_date > ?::date THEN NULL
+                    WHEN p.prev_revenue IS NULL OR p.prev_revenue = 0          THEN NULL
+                    ELSE ROUND(((c.revenue - p.prev_revenue) / p.prev_revenue * 100)::numeric, 1)
+                END AS revenue_delta,
+                CASE
+                    WHEN e.earliest_date IS NULL OR e.earliest_date > ?::date THEN NULL
+                    WHEN p.prev_units IS NULL OR p.prev_units = 0              THEN NULL
+                    ELSE ROUND(((c.units - p.prev_units)::decimal / p.prev_units * 100)::numeric, 1)
+                END AS units_delta,
+                pr.stock_status,
+                pr.stock_quantity
+            FROM current_p c
+            CROSS JOIN earliest e
+            LEFT JOIN prev_p p    ON p.product_external_id = c.product_external_id
+            LEFT JOIN products pr ON pr.store_id = ? AND pr.external_id = c.product_external_id
+            ORDER BY c.revenue DESC NULLS LAST
             LIMIT 100",
-            [$store->id, $from, $to],
+            [$store->id, $from, $to, $store->id, $compareFrom, $compareTo, $store->id, $compareFrom, $compareFrom, $store->id],
         );
 
         return Inertia::render('Stores/Products', [
             'store'    => $this->storeProps($store),
             'products' => array_map(fn ($p) => [
-                'external_id' => $p->external_id,
-                'name'        => $p->name,
-                'units'       => (int) $p->units,
-                'revenue'     => (float) $p->revenue,
+                'external_id'    => $p->external_id,
+                'name'           => $p->name,
+                'units'          => (int) $p->units,
+                'revenue'        => (float) $p->revenue,
+                'revenue_delta'  => $p->revenue_delta !== null ? (float) $p->revenue_delta : null,
+                'units_delta'    => $p->units_delta   !== null ? (float) $p->units_delta   : null,
+                'stock_status'   => $p->stock_status,
+                'stock_quantity' => $p->stock_quantity !== null ? (int) $p->stock_quantity : null,
             ], $products),
             'from' => $from,
             'to'   => $to,
@@ -148,17 +255,20 @@ class StoreController extends Controller
         $from      = $validated['from'] ?? now()->subDays(29)->toDateString();
         $to        = $validated['to']   ?? now()->toDateString();
 
-        // Aggregate revenue_by_country JSONB across daily_snapshots for the period
+        // Why: revenue_by_country JSONB dropped from daily_snapshots; query orders directly.
+        // shipping_country is indexed on (workspace_id, shipping_country).
+        // See: PLANNING.md "Which table to query"
         $rows = DB::select(
             "SELECT
-                kv.key                   AS country_code,
-                SUM(kv.value::numeric)   AS revenue
-            FROM daily_snapshots,
-                jsonb_each_text(revenue_by_country) AS kv
+                shipping_country                   AS country_code,
+                SUM(total_in_reporting_currency)   AS revenue
+            FROM orders
             WHERE store_id = ?
-              AND date BETWEEN ? AND ?
-              AND revenue_by_country IS NOT NULL
-            GROUP BY kv.key
+              AND occurred_at::date BETWEEN ? AND ?
+              AND status IN ('completed', 'processing')
+              AND shipping_country IS NOT NULL
+              AND total_in_reporting_currency IS NOT NULL
+            GROUP BY shipping_country
             ORDER BY revenue DESC",
             [$store->id, $from, $to],
         );
@@ -210,6 +320,10 @@ class StoreController extends Controller
         $dailyStats = GscDailyStat::withoutGlobalScopes()
             ->where('property_id', $property->id)
             ->whereBetween('date', [$from, $to])
+            // Why: filter to aggregate rows only — breakdown rows (per device/country)
+            // were added in Phase 0 migration and would produce duplicate dates otherwise.
+            ->where('device', 'all')
+            ->where('country', 'ZZ')
             ->selectRaw('date::text AS date, clicks, impressions, ctr, position')
             ->orderBy('date')
             ->get()
@@ -225,6 +339,8 @@ class StoreController extends Controller
         $topQueries = GscQuery::withoutGlobalScopes()
             ->where('property_id', $property->id)
             ->whereBetween('date', [$from, $to])
+            ->where('device', 'all')
+            ->where('country', 'ZZ')
             ->selectRaw("
                 query,
                 SUM(clicks)      AS clicks,
@@ -232,7 +348,9 @@ class StoreController extends Controller
                 CASE WHEN SUM(impressions) > 0
                     THEN SUM(clicks)::numeric / SUM(impressions)
                     ELSE NULL END AS ctr,
-                AVG(position)    AS position
+                CASE WHEN SUM(impressions) > 0
+                    THEN SUM(position * impressions) / SUM(impressions)
+                    ELSE NULL END AS position
             ")
             ->groupBy('query')
             ->orderByRaw('SUM(clicks) DESC')
@@ -249,6 +367,8 @@ class StoreController extends Controller
         $topPages = GscPage::withoutGlobalScopes()
             ->where('property_id', $property->id)
             ->whereBetween('date', [$from, $to])
+            ->where('device', 'all')
+            ->where('country', 'ZZ')
             ->selectRaw("
                 page,
                 SUM(clicks)      AS clicks,
@@ -256,7 +376,9 @@ class StoreController extends Controller
                 CASE WHEN SUM(impressions) > 0
                     THEN SUM(clicks)::numeric / SUM(impressions)
                     ELSE NULL END AS ctr,
-                AVG(position)    AS position
+                CASE WHEN SUM(impressions) > 0
+                    THEN SUM(position * impressions) / SUM(impressions)
+                    ELSE NULL END AS position
             ")
             ->groupBy('page')
             ->orderByRaw('SUM(clicks) DESC')
@@ -286,6 +408,69 @@ class StoreController extends Controller
         ]);
     }
 
+    public function performance(string $slug): Response
+    {
+        $store = $this->resolveStore($slug);
+
+        $this->authorize('update', $store);
+
+        $storeUrls = StoreUrl::withoutGlobalScopes()
+            ->where('store_id', $store->id)
+            ->orderByRaw('is_homepage DESC')
+            ->orderBy('created_at')
+            ->get();
+
+        // Attach latest mobile Lighthouse scores for each URL.
+        $urlIds = $storeUrls->pluck('id')->all();
+        $latestScores = collect();
+        if (! empty($urlIds)) {
+            $latestScores = LighthouseSnapshot::withoutGlobalScopes()
+                ->where('workspace_id', $store->workspace_id)
+                ->whereIn('store_url_id', $urlIds)
+                ->where('strategy', 'mobile')
+                ->selectRaw('DISTINCT ON (store_url_id) store_url_id, performance_score, lcp_ms, checked_at')
+                ->orderByRaw('store_url_id, checked_at DESC')
+                ->get()
+                ->keyBy('store_url_id');
+        }
+
+        $urlData = $storeUrls->map(function (StoreUrl $su) use ($latestScores) {
+            $snap = $latestScores->get($su->id);
+            return [
+                'id'                => $su->id,
+                'url'               => $su->url,
+                'label'             => $su->label,
+                'is_homepage'       => $su->is_homepage,
+                'is_active'         => $su->is_active,
+                'performance_score' => $snap?->performance_score,
+                'lcp_ms'            => $snap?->lcp_ms,
+                'checked_at'        => $snap?->checked_at?->toISOString(),
+            ];
+        })->all();
+
+        // GSC page suggestions (same as settings page)
+        $workspace = Workspace::withoutGlobalScopes()->find($store->workspace_id);
+        $gscSuggestions = [];
+        if ($workspace->has_gsc) {
+            $existingUrls   = array_column($urlData, 'url');
+            $gscSuggestions = GscPage::withoutGlobalScopes()
+                ->where('workspace_id', $store->workspace_id)
+                ->when($existingUrls, fn ($q) => $q->whereNotIn('page', $existingUrls))
+                ->groupBy(['workspace_id', 'page'])
+                ->selectRaw('page, SUM(clicks) AS total_clicks')
+                ->orderByDesc('total_clicks')
+                ->limit(5)
+                ->pluck('page')
+                ->all();
+        }
+
+        return Inertia::render('Stores/Performance', [
+            'store'           => $this->storeProps($store),
+            'store_urls'      => $urlData,
+            'gsc_suggestions' => $gscSuggestions,
+        ]);
+    }
+
     public function settings(string $slug): Response
     {
         $store = $this->resolveStore($slug);
@@ -295,6 +480,119 @@ class StoreController extends Controller
         return Inertia::render('Stores/Settings', [
             'store' => $this->storeProps($store),
         ]);
+    }
+
+    public function addUrl(Request $request, string $slug): RedirectResponse
+    {
+        $store = $this->resolveStore($slug);
+
+        $this->authorize('update', $store);
+
+        $validated = $request->validate([
+            'url'   => ['required', 'string', 'url', 'max:2048'],
+            'label' => ['nullable', 'string', 'max:255'],
+        ]);
+
+        $count = StoreUrl::withoutGlobalScopes()
+            ->where('store_id', $store->id)
+            ->count();
+
+        if ($count >= 10) {
+            return back()->withErrors(['url' => 'Maximum of 10 monitored URLs per store.']);
+        }
+
+        $storeUrl = StoreUrl::withoutGlobalScopes()->updateOrCreate(
+            ['store_id' => $store->id, 'url' => $validated['url']],
+            [
+                'workspace_id' => $store->workspace_id,
+                'label'        => $validated['label'] ?? null,
+                'is_homepage'  => false,
+                'is_active'    => true,
+            ]
+        );
+
+        // Dispatch Lighthouse checks immediately so the user sees data in minutes.
+        // Both strategies are dispatched; mobile runs first (more important for SEO).
+        // See: app/Jobs/RunLighthouseCheckJob.php
+        foreach (['mobile', 'desktop'] as $strategy) {
+            RunLighthouseCheckJob::dispatch(
+                $storeUrl->id,
+                $store->id,
+                $store->workspace_id,
+                $strategy,
+            );
+        }
+
+        return back()->with('success', 'URL added. Lighthouse check queued — results appear within a few minutes.');
+    }
+
+    public function updateUrl(Request $request, string $slug, int $urlId): RedirectResponse
+    {
+        $store = $this->resolveStore($slug);
+
+        $this->authorize('update', $store);
+
+        $storeUrl = StoreUrl::withoutGlobalScopes()
+            ->where('store_id', $store->id)
+            ->findOrFail($urlId);
+
+        $validated = $request->validate([
+            'label'     => ['nullable', 'string', 'max:255'],
+            'is_active' => ['required', 'boolean'],
+        ]);
+
+        $wasInactive = ! $storeUrl->is_active;
+        $storeUrl->update($validated);
+
+        // When resuming a paused URL, dispatch an immediate check so the user
+        // doesn't wait until the next scheduled daily run to see fresh data.
+        if ($wasInactive && $validated['is_active']) {
+            foreach (['mobile', 'desktop'] as $strategy) {
+                RunLighthouseCheckJob::dispatch($storeUrl->id, $store->id, $store->workspace_id, $strategy);
+            }
+        }
+
+        return back()->with('success', 'URL updated.');
+    }
+
+    public function checkUrlNow(Request $request, string $slug, int $urlId): RedirectResponse
+    {
+        $store = $this->resolveStore($slug);
+
+        $this->authorize('update', $store);
+
+        $storeUrl = StoreUrl::withoutGlobalScopes()
+            ->where('store_id', $store->id)
+            ->findOrFail($urlId);
+
+        if (! $storeUrl->is_active) {
+            return back()->withErrors(['url' => 'Cannot check a paused URL.']);
+        }
+
+        foreach (['mobile', 'desktop'] as $strategy) {
+            RunLighthouseCheckJob::dispatch($storeUrl->id, $store->id, $store->workspace_id, $strategy);
+        }
+
+        return back()->with('success', 'Lighthouse check queued — results appear within a few minutes.');
+    }
+
+    public function removeUrl(Request $request, string $slug, int $urlId): RedirectResponse
+    {
+        $store = $this->resolveStore($slug);
+
+        $this->authorize('update', $store);
+
+        $storeUrl = StoreUrl::withoutGlobalScopes()
+            ->where('store_id', $store->id)
+            ->findOrFail($urlId);
+
+        if ($storeUrl->is_homepage) {
+            return back()->withErrors(['url' => 'The homepage URL cannot be removed.']);
+        }
+
+        $storeUrl->delete();
+
+        return back()->with('success', 'URL removed.');
     }
 
     public function update(Request $request, string $slug): RedirectResponse
@@ -336,9 +634,9 @@ class StoreController extends Controller
     {
         return $request->validate([
             'from'         => ['sometimes', 'nullable', 'date_format:Y-m-d'],
-            'to'           => ['sometimes', 'nullable', 'date_format:Y-m-d'],
+            'to'           => ['sometimes', 'nullable', 'date_format:Y-m-d', 'after_or_equal:from'],
             'compare_from' => ['sometimes', 'nullable', 'date_format:Y-m-d'],
-            'compare_to'   => ['sometimes', 'nullable', 'date_format:Y-m-d'],
+            'compare_to'   => ['sometimes', 'nullable', 'date_format:Y-m-d', 'after_or_equal:compare_from'],
             'granularity'  => ['sometimes', 'nullable', 'in:hourly,daily,weekly'],
         ]);
     }

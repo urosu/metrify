@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Http\Middleware;
 
+use App\Models\Workspace;
 use App\Models\WorkspaceUser;
 use App\Services\WorkspaceContext;
 use Closure;
@@ -14,7 +15,6 @@ class SetActiveWorkspace
 {
     // Paths where we skip setting workspace context entirely (no auth context needed).
     private const SKIP_PATHS = [
-        'onboarding',
         'onboarding',
         'login',
         'register',
@@ -39,12 +39,34 @@ class SetActiveWorkspace
         }
 
         $user = $request->user();
-        $sessionWorkspaceId = session('active_workspace_id');
 
-        $workspaceId = $this->resolveWorkspaceId($user->id, $sessionWorkspaceId);
+        // --- Route-based resolution (workspace-prefixed routes) ---
+        // When the URL starts with /{workspace:slug}/, Laravel's implicit binding
+        // resolves the Workspace model before middleware runs. Use it directly.
+        $routeWorkspace = $request->route('workspace');
+        if ($routeWorkspace instanceof Workspace) {
+            $isMember = WorkspaceUser::where('user_id', $user->id)
+                ->where('workspace_id', $routeWorkspace->id)
+                ->whereHas('workspace', fn ($q) => $q->whereNull('deleted_at'))
+                ->exists();
+
+            if (! $isMember) {
+                abort(403, 'You do not have access to this workspace.');
+            }
+
+            app(WorkspaceContext::class)->set($routeWorkspace->id);
+            // Keep session in sync so the workspace switcher reflects the URL.
+            session(['active_workspace_id' => $routeWorkspace->id]);
+
+            return $next($request);
+        }
+
+        // --- Session-based resolution (routes without workspace prefix) ---
+        // Used for: workspace switch action, invitations, profile actions, etc.
+        $sessionWorkspaceId = session('active_workspace_id');
+        $workspaceId        = $this->resolveWorkspaceId($user->id, $sessionWorkspaceId);
 
         if ($workspaceId === null) {
-            // On OAuth paths, let the controller handle the missing workspace
             if ($this->shouldSkipRedirect($request)) {
                 return $next($request);
             }
@@ -67,7 +89,6 @@ class SetActiveWorkspace
             }
         }
 
-        // password/* wildcard
         if (str_starts_with($path, 'password/')) {
             return true;
         }

@@ -5,14 +5,17 @@ declare(strict_types=1);
 namespace App\Http\Controllers;
 
 use App\Exceptions\FacebookApiException;
+use App\Jobs\ComputeUtmCoverageJob;
 use App\Jobs\SyncAdInsightsJob;
 use App\Models\AdAccount;
+use App\Models\SyncLog;
 use App\Models\WorkspaceUser;
 use App\Services\Integrations\Facebook\FacebookAdsClient;
 use App\Services\WorkspaceContext;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
@@ -48,11 +51,16 @@ class FacebookOAuthController extends Controller
 
         $this->authorizeWorkspaceAccess($request, $workspaceId);
 
+        // Why: when initiated from onboarding tiles, return_to=onboarding routes the callback
+        // and account-selection redirect back to /onboarding instead of /settings/integrations.
+        $returnTo = $request->query('from') === 'onboarding' ? 'onboarding' : 'integrations';
+
         $state = $this->encodeState([
             'workspace_id' => $workspaceId,
             'type'         => 'facebook',
             'nonce'        => Str::random(16),
             'expires_at'   => now()->addMinutes(15)->timestamp,
+            'return_to'    => $returnTo,
         ]);
 
         $params = http_build_query([
@@ -80,16 +88,15 @@ class FacebookOAuthController extends Controller
             Log::warning('Facebook OAuth: invalid or expired state', [
                 'state_type' => $state['type'] ?? null,
             ]);
-            return redirect()->away(rtrim(config('app.url'), '/') . '/settings/integrations')
-                ->with('error', 'Facebook connection failed: invalid or expired link. Please try again.');
+            return redirect()->away(rtrim(config('app.url'), '/') . '/settings/integrations?oauth_error=' . urlencode('Facebook connection failed: invalid or expired link. Please try again.') . '&oauth_platform=facebook');
         }
 
         $workspaceId = (int) $state['workspace_id'];
+        $returnTo    = $state['return_to'] ?? 'integrations';
 
         // Handle user-denied permission
         if ($request->query('error')) {
-            return redirect()->away(rtrim(config('app.url'), '/') . '/settings/integrations')
-                ->with('error', 'Facebook connection was cancelled.');
+            return redirect()->away(rtrim(config('app.url'), '/') . $this->oauthDest($returnTo) . '?oauth_error=' . urlencode('Facebook connection was cancelled.') . '&oauth_platform=facebook');
         }
 
         $code = (string) $request->query('code', '');
@@ -100,18 +107,22 @@ class FacebookOAuthController extends Controller
 
             $client     = new FacebookAdsClient($longToken);
             $adAccounts = $client->fetchAllAdAccounts();
+        } catch (\App\Exceptions\FacebookRateLimitException $e) {
+            Log::warning('Facebook OAuth: rate limit hit while fetching ad accounts', [
+                'workspace_id' => $workspaceId,
+                'retry_after'  => $e->retryAfter,
+            ]);
+            return redirect()->away(rtrim(config('app.url'), '/') . $this->oauthDest($returnTo) . '?oauth_error=' . urlencode('Facebook is temporarily rate-limited. Please wait a minute and try connecting again.') . '&oauth_platform=facebook');
         } catch (FacebookApiException $e) {
             Log::error('Facebook OAuth: token exchange or account fetch failed', [
                 'workspace_id' => $workspaceId,
                 'error'        => $e->getMessage(),
             ]);
-            return redirect()->away(rtrim(config('app.url'), '/') . '/settings/integrations')
-                ->with('error', 'Facebook connection failed: ' . $e->getMessage());
+            return redirect()->away(rtrim(config('app.url'), '/') . $this->oauthDest($returnTo) . '?oauth_error=' . urlencode('Facebook connection failed: ' . $e->getMessage()) . '&oauth_platform=facebook');
         }
 
         if (empty($adAccounts)) {
-            return redirect()->away(rtrim(config('app.url'), '/') . '/settings/integrations')
-                ->with('error', 'No Facebook ad accounts were found for this user.');
+            return redirect()->away(rtrim(config('app.url'), '/') . $this->oauthDest($returnTo) . '?oauth_error=' . urlencode('No Facebook ad accounts were found for this user.') . '&oauth_platform=facebook');
         }
 
         $pendingKey = 'fb_pending_' . Str::uuid();
@@ -125,9 +136,10 @@ class FacebookOAuthController extends Controller
                 'name'     => (string) ($a['name'] ?? ltrim((string) $a['id'], 'act_')),
                 'currency' => strtoupper((string) ($a['currency'] ?? 'USD')),
             ], $adAccounts),
+            'return_to'    => $returnTo,
         ], now()->addMinutes(15));
 
-        $redirectUrl = rtrim(config('app.url'), '/') . '/settings/integrations?fb_pending=' . urlencode($pendingKey);
+        $redirectUrl = rtrim(config('app.url'), '/') . $this->oauthDest($returnTo) . '?fb_pending=' . urlencode($pendingKey);
 
         return redirect()->away($redirectUrl);
     }
@@ -158,6 +170,8 @@ class FacebookOAuthController extends Controller
             return redirect('/settings/integrations')
                 ->with('error', 'Link expired. Please re-connect Facebook.');
         }
+
+        $returnTo = $pending['return_to'] ?? 'integrations';
 
         cache()->forget($validated['fb_pending_key']);
 
@@ -193,11 +207,32 @@ class FacebookOAuthController extends Controller
                     'historical_import_progress'   => null,
                 ]);
 
-                \App\Jobs\AdHistoricalImportJob::dispatch($adAccount->id, $workspaceId);
+                $adSyncLog = SyncLog::create([
+                    'workspace_id'  => $workspaceId,
+                    'syncable_type' => AdAccount::class,
+                    'syncable_id'   => $adAccount->id,
+                    'job_type'      => \App\Jobs\AdHistoricalImportJob::class,
+                    'status'        => 'queued',
+                    'queue'         => 'low',
+                    'scheduled_at'  => now(),
+                ]);
+
+                \App\Jobs\AdHistoricalImportJob::dispatch($adAccount->id, $workspaceId, $adSyncLog->id);
             }
 
             SyncAdInsightsJob::dispatch($adAccount->id, $workspaceId);
             $connected++;
+        }
+
+        if ($connected > 0) {
+            // Why: has_ads drives billing basis for non-ecom workspaces + nav visibility.
+            // See: PLANNING.md "Billing basis auto-derivation"
+            DB::table('workspaces')
+                ->where('id', $workspaceId)
+                ->update(['has_ads' => true]);
+
+            // Recompute UTM coverage now that ads are connected.
+            ComputeUtmCoverageJob::dispatch($workspaceId)->onQueue('low');
         }
 
         Log::info('Facebook OAuth: connected ad accounts', [
@@ -205,7 +240,7 @@ class FacebookOAuthController extends Controller
             'count'        => $connected,
         ]);
 
-        return redirect('/settings/integrations')
+        return redirect($this->oauthDest($returnTo))
             ->with('success', "{$connected} Facebook ad account(s) connected successfully.");
     }
 
@@ -353,6 +388,15 @@ class FacebookOAuthController extends Controller
      *
      * Connecting integrations requires owner or admin role. Members cannot.
      */
+    /**
+     * Return the path to redirect to after OAuth, depending on where the flow was initiated.
+     * When initiated from onboarding tiles, return '/onboarding'; otherwise '/settings/integrations'.
+     */
+    private function oauthDest(string $returnTo): string
+    {
+        return $returnTo === 'onboarding' ? '/onboarding' : '/settings/integrations';
+    }
+
     private function authorizeWorkspaceAccess(Request $request, int $workspaceId): void
     {
         $allowed = WorkspaceUser::where('user_id', $request->user()?->id)

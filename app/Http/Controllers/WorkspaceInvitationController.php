@@ -65,12 +65,12 @@ class WorkspaceInvitationController extends Controller
         try {
             $action->handle($invitation, $request->user());
         } catch (\RuntimeException $e) {
-            return redirect()->route('dashboard')->withErrors(['invitation' => $e->getMessage()]);
+            return $this->toDashboard($invitation->workspace_id)->withErrors(['invitation' => $e->getMessage()]);
         }
 
         $request->session()->put('active_workspace_id', $invitation->workspace_id);
 
-        return redirect()->route('dashboard')->with('success', 'You have joined the workspace.');
+        return $this->toDashboard($invitation->workspace_id)->with('success', 'You have joined the workspace.');
     }
 
     /**

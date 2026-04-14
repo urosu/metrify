@@ -3,6 +3,8 @@ import AppLayout from '@/Components/layouts/AppLayout';
 import { StoreLayout } from '@/Components/layouts/StoreLayout';
 import type { StoreData } from '@/Components/layouts/StoreLayout';
 import { DateRangePicker } from '@/Components/shared/DateRangePicker';
+import { TrendBadge } from '@/Components/shared/TrendBadge';
+import { StatusBadge } from '@/Components/shared/StatusBadge';
 import { formatCurrency, formatNumber } from '@/lib/formatters';
 import type { PageProps } from '@/types';
 
@@ -11,6 +13,10 @@ interface ProductRow {
     name: string;
     units: number;
     revenue: number;
+    revenue_delta: number | null;
+    units_delta: number | null;
+    stock_status: string | null;
+    stock_quantity: number | null;
 }
 
 interface Props extends PageProps {
@@ -54,13 +60,30 @@ export default function StoreProducts({ store, products }: Props) {
                                         <td className="px-4 py-3 text-zinc-400 tabular-nums">{index + 1}</td>
                                         <td className="px-4 py-3">
                                             <div className="font-medium text-zinc-900">{product.name}</div>
-                                            <div className="text-xs text-zinc-400">ID: {product.external_id}</div>
+                                            <div className="flex items-center gap-2 mt-0.5">
+                                                <span className="text-xs text-zinc-400">ID: {product.external_id}</span>
+                                                {product.stock_status && product.stock_status !== 'in_stock' && (
+                                                    <StatusBadge status={product.stock_status} preset="stock" />
+                                                )}
+                                            </div>
                                         </td>
-                                        <td className="px-4 py-3 text-right text-zinc-600 tabular-nums hidden sm:table-cell">
-                                            {formatNumber(product.units)}
+                                        <td className="px-4 py-3 text-right hidden sm:table-cell">
+                                            <div className="text-zinc-600 tabular-nums">{formatNumber(product.units)}</div>
+                                            {product.units_delta != null && (
+                                                <div className="flex justify-end mt-0.5">
+                                                    <TrendBadge value={product.units_delta} />
+                                                </div>
+                                            )}
                                         </td>
-                                        <td className="px-4 py-3 text-right font-medium text-zinc-900 tabular-nums">
-                                            {formatCurrency(product.revenue, currency)}
+                                        <td className="px-4 py-3 text-right">
+                                            <div className="font-medium text-zinc-900 tabular-nums">
+                                                {formatCurrency(product.revenue, currency)}
+                                            </div>
+                                            {product.revenue_delta != null && (
+                                                <div className="flex justify-end mt-0.5">
+                                                    <TrendBadge value={product.revenue_delta} />
+                                                </div>
+                                            )}
                                         </td>
                                     </tr>
                                 ))}

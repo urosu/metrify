@@ -224,6 +224,20 @@ return [
             'timeout'    => 300,
             'nice'       => 0,
         ],
+        // Why: user-triggered WooCommerce historical imports (onboarding-critical) need
+        // their own worker slot so they are never blocked by background GSC/Ad imports
+        // that share the low queue. The import queue has dedicated capacity and is
+        // never occupied by anything other than WooCommerceHistoricalImportJob.
+        // See: WooCommerceHistoricalImportJob, StartHistoricalImportAction.
+        'supervisor-import' => [
+            'connection' => 'redis',
+            'queue'      => ['import'],
+            'balance'    => 'simple',
+            'processes'  => 1,
+            'tries'      => 3,
+            'timeout'    => 7200,
+            'nice'       => 0,
+        ],
         'supervisor-low' => [
             'connection' => 'redis',
             'queue'      => ['low'],
@@ -241,6 +255,7 @@ return [
             'supervisor-critical' => ['processes' => 3],
             'supervisor-high'     => ['processes' => 2],
             'supervisor-default'  => ['processes' => 4],
+            'supervisor-import'   => ['processes' => 1],
             'supervisor-low'      => ['processes' => 2],
         ],
 
@@ -249,6 +264,7 @@ return [
             'supervisor-critical' => ['processes' => 1],
             'supervisor-high'     => ['processes' => 1],
             'supervisor-default'  => ['processes' => 2],
+            'supervisor-import'   => ['processes' => 1],
             'supervisor-low'      => ['processes' => 1],
         ],
     ],

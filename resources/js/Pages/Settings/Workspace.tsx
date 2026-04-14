@@ -1,9 +1,10 @@
-import InputError from '@/Components/InputError';
-import InputLabel from '@/Components/InputLabel';
-import TextInput from '@/Components/TextInput';
+import { Input } from '@/Components/ui/input';
+import { Label } from '@/Components/ui/label';
 import AppLayout from '@/Components/layouts/AppLayout';
 import { PageHeader } from '@/Components/shared/PageHeader';
+import { TimezoneSelect } from '@/Components/shared/TimezoneSelect';
 import { Head, useForm, router } from '@inertiajs/react';
+import { wurl } from '@/lib/workspace-url';
 import { FormEventHandler, useState } from 'react';
 
 interface WorkspaceProps {
@@ -14,6 +15,8 @@ interface WorkspaceProps {
     reporting_timezone: string;
     billing_plan: string | null;
     trial_ends_at: string | null;
+    target_roas: number | null;
+    target_cpo: number | null;
 }
 
 const CURRENCIES = ['EUR', 'USD', 'GBP', 'CHF', 'PLN', 'CZK', 'HUF', 'SEK', 'NOK', 'DKK'];
@@ -27,11 +30,15 @@ export default function WorkspaceSettings({
 }) {
     const canEdit = userRole === 'owner' || userRole === 'admin';
     const isOwner = userRole === 'owner';
+    const w = (path: string) => wurl(workspace.slug, path);
 
     const { data, setData, patch, processing, errors, recentlySuccessful } = useForm({
         name: workspace.name,
+        slug: workspace.slug,
         reporting_currency: workspace.reporting_currency,
         reporting_timezone: workspace.reporting_timezone,
+        target_roas: workspace.target_roas !== null ? String(workspace.target_roas) : '',
+        target_cpo:  workspace.target_cpo  !== null ? String(workspace.target_cpo)  : '',
     });
 
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -39,12 +46,12 @@ export default function WorkspaceSettings({
 
     const submit: FormEventHandler = (e) => {
         e.preventDefault();
-        patch(route('settings.workspace.update'));
+        patch(w('/settings/workspace'));
     };
 
     const submitDelete: FormEventHandler = (e) => {
         e.preventDefault();
-        deleteForm.delete(route('settings.workspace.destroy'));
+        deleteForm.delete(w('/settings/workspace'));
     };
 
     return (
@@ -62,38 +69,47 @@ export default function WorkspaceSettings({
                     </div>
                     <form onSubmit={submit} className="space-y-5 px-6 py-5">
                         <div>
-                            <InputLabel htmlFor="name" value="Workspace name" />
-                            <TextInput
+                            <Label htmlFor="name">Workspace name</Label>
+                            <Input
                                 id="name"
                                 value={data.name}
                                 onChange={(e) => setData('name', e.target.value)}
-                                className="mt-1 block w-full"
+                                className="mt-1"
                                 disabled={!canEdit}
                                 required
                             />
-                            <InputError message={errors.name} className="mt-2" />
+                            {errors.name && <p className="mt-2 text-sm text-red-600">{errors.name}</p>}
                         </div>
 
                         <div>
-                            <InputLabel htmlFor="slug" value="Slug" />
-                            <TextInput
+                            <Label htmlFor="slug">Workspace ID (slug)</Label>
+                            <Input
                                 id="slug"
-                                value={workspace.slug}
-                                className="mt-1 block w-full bg-zinc-50 text-zinc-500"
-                                disabled
-                                readOnly
+                                value={data.slug}
+                                onChange={(e) => setData('slug', e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '-'))}
+                                className="mt-1 font-mono"
+                                disabled={!isOwner}
                             />
-                            <p className="mt-1 text-xs text-zinc-400">The slug is permanent and cannot be changed.</p>
+                            {errors.slug ? (
+                                <p className="mt-1 text-xs text-red-600">{errors.slug}</p>
+                            ) : isOwner ? (
+                                <p className="mt-1 text-xs text-zinc-400">
+                                    Changing this updates all workspace URLs and invalidates any bookmarks.
+                                    Lowercase letters, numbers, and hyphens only.
+                                </p>
+                            ) : (
+                                <p className="mt-1 text-xs text-zinc-400">Only the workspace owner can change this.</p>
+                            )}
                         </div>
 
                         <div>
-                            <InputLabel htmlFor="reporting_currency" value="Reporting currency" />
+                            <Label htmlFor="reporting_currency">Reporting currency</Label>
                             <select
                                 id="reporting_currency"
                                 value={data.reporting_currency}
                                 onChange={(e) => setData('reporting_currency', e.target.value)}
                                 disabled={!canEdit}
-                                className="mt-1 block w-full rounded-md border-zinc-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 disabled:opacity-50"
+                                className="mt-1 block w-full rounded-md border-zinc-300 shadow-sm focus:border-primary focus:ring-primary disabled:opacity-50"
                             >
                                 {CURRENCIES.map((c) => (
                                     <option key={c} value={c}>{c}</option>
@@ -102,23 +118,59 @@ export default function WorkspaceSettings({
                             <p className="mt-1 text-xs text-zinc-400">
                                 Changing this triggers a background recomputation of all revenue figures.
                             </p>
-                            <InputError message={errors.reporting_currency} className="mt-2" />
+                            {errors.reporting_currency && <p className="mt-2 text-sm text-red-600">{errors.reporting_currency}</p>}
                         </div>
 
                         <div>
-                            <InputLabel htmlFor="reporting_timezone" value="Reporting timezone" />
-                            <TextInput
+                            <Label htmlFor="reporting_timezone">Reporting timezone</Label>
+                            <TimezoneSelect
                                 id="reporting_timezone"
                                 value={data.reporting_timezone}
-                                onChange={(e) => setData('reporting_timezone', e.target.value)}
-                                className="mt-1 block w-full"
+                                onChange={(tz) => setData('reporting_timezone', tz)}
                                 disabled={!canEdit}
-                                placeholder="Europe/Berlin"
+                                className="mt-1"
                             />
-                            <p className="mt-1 text-xs text-zinc-400">
-                                IANA timezone identifier, e.g. Europe/Berlin, America/New_York.
+                            {errors.reporting_timezone && <p className="mt-2 text-sm text-red-600">{errors.reporting_timezone}</p>}
+                        </div>
+
+                        <div className="border-t border-zinc-100 pt-5">
+                            <p className="mb-4 text-sm font-medium text-zinc-700">Performance targets</p>
+                            <p className="mb-4 text-xs text-zinc-400">
+                                Used to classify campaigns as Winners or Losers. Leave blank to use break-even defaults (1.0× ROAS).
                             </p>
-                            <InputError message={errors.reporting_timezone} className="mt-2" />
+                            <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                    <Label htmlFor="target_roas">Target ROAS (×)</Label>
+                                    <Input
+                                        id="target_roas"
+                                        type="number"
+                                        min="0"
+                                        max="100"
+                                        step="0.1"
+                                        value={data.target_roas}
+                                        onChange={(e) => setData('target_roas', e.target.value)}
+                                        className="mt-1"
+                                        disabled={!canEdit}
+                                        placeholder="e.g. 3.5"
+                                    />
+                                    {errors.target_roas && <p className="mt-2 text-sm text-red-600">{errors.target_roas}</p>}
+                                </div>
+                                <div>
+                                    <Label htmlFor="target_cpo">Target CPO ({workspace.reporting_currency})</Label>
+                                    <Input
+                                        id="target_cpo"
+                                        type="number"
+                                        min="0"
+                                        step="0.01"
+                                        value={data.target_cpo}
+                                        onChange={(e) => setData('target_cpo', e.target.value)}
+                                        className="mt-1"
+                                        disabled={!canEdit}
+                                        placeholder="e.g. 25.00"
+                                    />
+                                    {errors.target_cpo && <p className="mt-2 text-sm text-red-600">{errors.target_cpo}</p>}
+                                </div>
+                            </div>
                         </div>
 
                         {canEdit && (
@@ -126,7 +178,7 @@ export default function WorkspaceSettings({
                                 <button
                                     type="submit"
                                     disabled={processing}
-                                    className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50 transition-colors"
+                                    className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors"
                                 >
                                     Save changes
                                 </button>
@@ -151,7 +203,7 @@ export default function WorkspaceSettings({
                             </p>
                             <p className="mt-1 text-sm text-zinc-600">
                                 Before deleting, you must cancel any active subscription in{' '}
-                                <a href={route('settings.billing')} className="text-indigo-600 hover:underline">
+                                <a href={w('/settings/billing')} className="text-primary hover:underline">
                                     Billing settings
                                 </a>
                                 .
@@ -168,21 +220,18 @@ export default function WorkspaceSettings({
                             ) : (
                                 <form onSubmit={submitDelete} className="mt-4 space-y-4">
                                     <div>
-                                        <InputLabel
-                                            htmlFor="confirmation"
-                                            value={`Type "${workspace.name}" to confirm`}
-                                        />
-                                        <TextInput
+                                        <Label htmlFor="confirmation">Type "{workspace.name}" to confirm</Label>
+                                        <Input
                                             id="confirmation"
                                             value={deleteForm.data.confirmation}
                                             onChange={(e) =>
                                                 deleteForm.setData('confirmation', e.target.value)
                                             }
-                                            className="mt-1 block w-full"
+                                            className="mt-1"
                                             placeholder={workspace.name}
                                         />
-                                        <InputError message={deleteForm.errors.confirmation} className="mt-2" />
-                                        <InputError message={(deleteForm.errors as Record<string, string>).deletion} className="mt-2" />
+                                        {deleteForm.errors.confirmation && <p className="mt-2 text-sm text-red-600">{deleteForm.errors.confirmation}</p>}
+                                        {(deleteForm.errors as Record<string, string>).deletion && <p className="mt-2 text-sm text-red-600">{(deleteForm.errors as Record<string, string>).deletion}</p>}
                                     </div>
                                     <div className="flex gap-3">
                                         <button

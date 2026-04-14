@@ -1,4 +1,4 @@
-import GuestLayout from '@/Layouts/GuestLayout';
+import AuthLayout from '@/Components/layouts/AuthLayout';
 import { Head, useForm } from '@inertiajs/react';
 import { formatDateOnly } from '@/lib/formatters';
 import { FormEventHandler } from 'react';
@@ -25,13 +25,13 @@ export default function Show({ invitation }: { invitation: InvitationProps }) {
     };
 
     return (
-        <GuestLayout>
+        <AuthLayout>
             <Head title="Workspace Invitation" />
 
             <div className="text-center">
-                <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-indigo-100">
+                <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-primary/15">
                     <svg
-                        className="h-7 w-7 text-indigo-600"
+                        className="h-7 w-7 text-primary"
                         fill="none"
                         viewBox="0 0 24 24"
                         stroke="currentColor"
@@ -60,12 +60,12 @@ export default function Show({ invitation }: { invitation: InvitationProps }) {
                     <button
                         type="submit"
                         disabled={processing}
-                        className="inline-flex items-center rounded-md bg-indigo-600 px-5 py-2 text-sm font-medium text-white shadow-sm hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 disabled:opacity-60"
+                        className="inline-flex items-center rounded-md bg-primary px-5 py-2 text-sm font-medium text-primary-foreground shadow-sm hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 disabled:opacity-60"
                     >
                         {processing ? 'Joining…' : 'Accept invitation'}
                     </button>
                 </form>
             </div>
-        </GuestLayout>
+        </AuthLayout>
     );
 }

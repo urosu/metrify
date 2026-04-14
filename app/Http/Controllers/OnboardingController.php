@@ -9,11 +9,13 @@ use App\Actions\CreateWorkspaceAction;
 use App\Actions\StartHistoricalImportAction;
 use App\Exceptions\WooCommerceConnectionException;
 use App\Models\Store;
+use App\Models\User;
 use App\Models\Workspace;
 use App\Models\WorkspaceUser;
 use Carbon\Carbon;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Inertia\Inertia;
 use Inertia\Response;
 
@@ -22,14 +24,19 @@ use Inertia\Response;
  *
  * Routes (all require auth + verified, SetActiveWorkspace skips 'onboarding/*'):
  *   GET  /onboarding         → show()         — detects current step from DB state
- *   POST /onboarding/store   → connectStore() — creates workspace + connects WooCommerce store
+ *   POST /onboarding/store   → connectStore() — connects WooCommerce store
  *   POST /onboarding/import  → startImport()  — records date range + dispatches import job
  *
  * Step detection logic in show():
- *   1 — no workspace or no store
+ *   1 — connection tiles (Store / Ad Accounts / GSC) — shown until a store is connected
+ *       or when only ads/GSC are connected (user can go to dashboard from here)
  *   2 — store connected, historical_import_status IS NULL (import not yet started)
  *   3 — historical_import_status IN (pending, running, failed)
  *   redirect /dashboard — historical_import_status = completed
+ *
+ * Workspace auto-creation: on the first visit we create a placeholder workspace so
+ * OAuth flows (which require a workspace_id in their state) can proceed before any
+ * store is connected. The workspace is renamed to the WooCommerce site title in connectStore().
  *
  * Invitation path: VerifyEmailController handles the invitation token and redirects
  * directly to /dashboard — the onboarding flow is never reached for invited users.
@@ -46,44 +53,68 @@ class OnboardingController extends Controller
             ->first();
 
         if ($workspaceUser === null) {
-            return Inertia::render('Onboarding/Index', ['step' => 1]);
+            // First visit — auto-create workspace so OAuth can proceed before any store is connected.
+            // The workspace is renamed to the WooCommerce site title once a store connects.
+            $workspace = $this->autoCreateWorkspace($user);
+            session(['active_workspace_id' => $workspace->id]);
+        } else {
+            $workspace = Workspace::find($workspaceUser->workspace_id);
+            // Ensure session is set so SetActiveWorkspace middleware finds the workspace
+            // on subsequent OAuth redirect requests.
+            session(['active_workspace_id' => $workspace->id]);
         }
 
-        // Workspace exists — load without WorkspaceScope (context not set on onboarding path)
-        $workspace = Workspace::find($workspaceUser->workspace_id);
-
+        // Check for a store
         $store = Store::withoutGlobalScopes()
             ->where('workspace_id', $workspace->id)
             ->orderBy('created_at')
             ->first();
 
-        if ($store === null) {
-            return Inertia::render('Onboarding/Index', ['step' => 1]);
+        if ($store !== null) {
+            $importStatus = $store->historical_import_status;
+
+            if ($importStatus === 'completed' && ! $request->boolean('add_store')) {
+                return redirect("/{$workspace->slug}/dashboard");
+            }
+
+            // add_store=true: show tiles again so user can connect another store
+            if ($importStatus !== 'completed' && $importStatus !== null) {
+                // pending | running | failed → show progress screen
+                return Inertia::render('Onboarding/Index', [
+                    'step'       => 3,
+                    'store_id'   => $store->id,
+                    'store_slug' => $store->slug,
+                ]);
+            }
+
+            if ($importStatus === null) {
+                return Inertia::render('Onboarding/Index', [
+                    'step'       => 2,
+                    'store_id'   => $store->id,
+                    'store_name' => $store->name,
+                ]);
+            }
+
+            // importStatus === 'completed' AND add_store=true → fall through to step 1
         }
 
-        $importStatus = $store->historical_import_status;
+        // Step 1 — connection tiles
+        $workspaceId = $workspace->id;
+        $fbPending   = $this->resolvePending($request->query('fb_pending'),   $workspaceId, 'accounts');
+        $gadsPending = $this->resolvePending($request->query('gads_pending'), $workspaceId, 'accounts');
+        $gscPending  = $this->resolvePending($request->query('gsc_pending'),  $workspaceId, 'properties');
+        $oauthError  = $request->query('oauth_error');
+        $oauthPlatform = $request->query('oauth_platform');
 
-        if ($importStatus === 'completed' && ! $request->boolean('add_store')) {
-            return redirect()->route('dashboard');
-        }
-
-        if ($importStatus === 'completed') {
-            return Inertia::render('Onboarding/Index', ['step' => 1]);
-        }
-
-        if ($importStatus === null) {
-            return Inertia::render('Onboarding/Index', [
-                'step'       => 2,
-                'store_id'   => $store->id,
-                'store_name' => $store->name,
-            ]);
-        }
-
-        // pending | running | failed → show progress screen
         return Inertia::render('Onboarding/Index', [
-            'step'       => 3,
-            'store_id'   => $store->id,
-            'store_slug' => $store->slug,
+            'step'           => 1,
+            'has_ads'        => (bool) $workspace->has_ads,
+            'has_gsc'        => (bool) $workspace->has_gsc,
+            'fb_pending'     => $fbPending,
+            'gads_pending'   => $gadsPending,
+            'gsc_pending'    => $gscPending,
+            'oauth_error'    => is_string($oauthError) && $oauthError !== '' ? $oauthError : null,
+            'oauth_platform' => is_string($oauthPlatform) && $oauthPlatform !== '' ? $oauthPlatform : null,
         ]);
     }
 
@@ -103,7 +134,8 @@ class OnboardingController extends Controller
 
         $user = $request->user();
 
-        // Reuse existing workspace if the user somehow already has one (edge case: re-entry)
+        // Reuse existing workspace (auto-created on first onboarding visit).
+        // Fallback: create one now in case show() was never called (edge case).
         $existingWorkspaceUser = WorkspaceUser::where('user_id', $user->id)
             ->whereHas('workspace', fn ($q) => $q->whereNull('deleted_at'))
             ->orderBy('created_at')
@@ -121,8 +153,9 @@ class OnboardingController extends Controller
 
         // Rename the workspace to the WooCommerce site title now that we have it.
         // This also fixes the case where a previous failed attempt left a stale domain name.
-        $newSlug = $create->generateUniqueSlug($store->name, $workspace->id);
-        $workspace->update(['name' => $store->name, 'slug' => $newSlug]);
+        // Slug is intentionally not updated here — it was randomised at workspace creation
+        // and must remain stable so any bookmarked links keep working.
+        $workspace->update(['name' => $store->name]);
 
         // Set active workspace in session so subsequent polling requests work
         session(['active_workspace_id' => $workspace->id]);
@@ -151,8 +184,6 @@ class OnboardingController extends Controller
         if ($store !== null) {
             $store->delete();
         }
-
-        session()->forget('active_workspace_id');
 
         return redirect()->route('onboarding');
     }
@@ -215,5 +246,63 @@ class OnboardingController extends Controller
         $action->handle($store, $fromDate);
 
         return redirect()->route('onboarding');
+    }
+
+    // -------------------------------------------------------------------------
+    // Private helpers
+    // -------------------------------------------------------------------------
+
+    /**
+     * Auto-create a placeholder workspace for a brand-new user on their first onboarding visit.
+     *
+     * The workspace is named "{user's name}'s Workspace" and renamed to the WooCommerce site
+     * title once a store is connected in connectStore(). This allows OAuth flows (Facebook,
+     * Google) to proceed before any store is connected — they require a workspace_id in state.
+     */
+    private function autoCreateWorkspace(User $user): Workspace
+    {
+        $create = new CreateWorkspaceAction();
+        $name   = trim($user->name) !== '' ? trim($user->name) . "'s Workspace" : 'My Workspace';
+        $slug   = $create->generateUniqueSlug($name);
+
+        return DB::transaction(function () use ($user, $name, $slug): Workspace {
+            $workspace = Workspace::create([
+                'name'               => $name,
+                'slug'               => $slug,
+                'owner_id'           => $user->id,
+                'reporting_currency' => 'EUR',
+                'reporting_timezone' => 'Europe/Berlin',
+                'trial_ends_at'      => now()->addDays(14),
+            ]);
+
+            WorkspaceUser::create([
+                'workspace_id' => $workspace->id,
+                'user_id'      => $user->id,
+                'role'         => 'owner',
+            ]);
+
+            return $workspace;
+        });
+    }
+
+    /**
+     * Read a pending OAuth cache entry and return the key + payload field for the frontend.
+     * Identical to IntegrationsController::resolvePending().
+     *
+     * @return array{key: string, items: mixed}|null
+     */
+    private function resolvePending(mixed $key, int $workspaceId, string $field): ?array
+    {
+        if (! is_string($key) || $key === '') {
+            return null;
+        }
+
+        $cached = cache()->get($key);
+
+        if ($cached === null || (int) ($cached['workspace_id'] ?? 0) !== $workspaceId) {
+            return null;
+        }
+
+        return ['key' => $key, 'items' => $cached[$field]];
     }
 }

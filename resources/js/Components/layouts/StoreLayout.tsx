@@ -1,6 +1,8 @@
 import React from 'react';
-import { Link } from '@inertiajs/react';
+import { Link, usePage } from '@inertiajs/react';
 import { cn } from '@/lib/utils';
+import { wurl } from '@/lib/workspace-url';
+import type { PageProps } from '@/types';
 
 export interface StoreData {
     id: number;
@@ -13,7 +15,7 @@ export interface StoreData {
     type: string;
 }
 
-type StoreTab = 'overview' | 'products' | 'countries' | 'seo' | 'settings';
+type StoreTab = 'overview' | 'products' | 'countries' | 'seo' | 'performance' | 'settings';
 
 interface StoreLayoutProps {
     store: StoreData;
@@ -22,20 +24,24 @@ interface StoreLayoutProps {
 }
 
 const TABS: { key: StoreTab; label: string }[] = [
-    { key: 'overview',   label: 'Overview'  },
-    { key: 'products',   label: 'Products'  },
-    { key: 'countries',  label: 'Countries' },
-    { key: 'seo',        label: 'SEO'       },
-    { key: 'settings',   label: 'Settings'  },
+    { key: 'overview',     label: 'Overview'     },
+    { key: 'products',     label: 'Products'     },
+    { key: 'countries',    label: 'Countries'    },
+    { key: 'seo',          label: 'SEO'          },
+    { key: 'performance',  label: 'Performance'  },
+    { key: 'settings',     label: 'Settings'     },
 ];
 
 export function StoreLayout({ store, activeTab, children }: StoreLayoutProps) {
+    const { workspace } = usePage<PageProps>().props;
+    const w = (path: string) => wurl(workspace?.slug, path);
+
     return (
         <div>
             {/* Breadcrumb + store header */}
             <div className="mb-5">
                 <div className="mb-1 flex items-center gap-1.5 text-sm text-zinc-400">
-                    <Link href="/stores" className="hover:text-zinc-600 transition-colors">
+                    <Link href={w('/stores')} className="hover:text-zinc-600 transition-colors">
                         Stores
                     </Link>
                     <span>/</span>
@@ -50,11 +56,11 @@ export function StoreLayout({ store, activeTab, children }: StoreLayoutProps) {
                 {TABS.map((tab) => (
                     <Link
                         key={tab.key}
-                        href={`/stores/${store.slug}/${tab.key}`}
+                        href={w(`/stores/${store.slug}/${tab.key}`)}
                         className={cn(
                             'px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors',
                             activeTab === tab.key
-                                ? 'border-indigo-600 text-indigo-600'
+                                ? 'border-primary text-primary'
                                 : 'border-transparent text-zinc-500 hover:text-zinc-700 hover:border-zinc-300',
                         )}
                     >

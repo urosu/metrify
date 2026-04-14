@@ -23,6 +23,7 @@ class User extends Authenticatable implements MustVerifyEmail
         'password',
         'is_super_admin',
         'last_login_at',
+        'view_preferences',
     ];
 
     protected $hidden = [
@@ -37,6 +38,7 @@ class User extends Authenticatable implements MustVerifyEmail
             'password' => 'hashed',
             'is_super_admin' => 'boolean',
             'last_login_at' => 'datetime',
+            'view_preferences' => 'array',
         ];
     }
 

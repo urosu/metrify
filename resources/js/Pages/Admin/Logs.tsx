@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Head, router } from '@inertiajs/react';
-import { AlertTriangle, CheckCircle, Clock, RefreshCw, ShieldAlert, XCircle } from 'lucide-react';
+import { Head, Link, router } from '@inertiajs/react';
+import { CheckCircle, RefreshCw, ShieldAlert, Trash2, XCircle } from 'lucide-react';
 import AppLayout from '@/Components/layouts/AppLayout';
 import { PageHeader } from '@/Components/shared/PageHeader';
+import { StatusBadge } from '@/Components/shared/StatusBadge';
 import { formatDatetime } from '@/lib/formatters';
 import type { PageProps } from '@/types';
 
@@ -12,11 +13,15 @@ interface SyncLog {
     id: number;
     workspace: { id: number; name: string } | null;
     job_type: string;
-    status: 'running' | 'completed' | 'failed';
+    status: 'queued' | 'running' | 'completed' | 'failed';
     records_processed: number | null;
     error_message: string | null;
     duration_seconds: number | null;
     started_at: string | null;
+    completed_at: string | null;
+    scheduled_at: string | null;
+    queue: string | null;
+    attempt: number;
     created_at: string;
 }
 
@@ -41,23 +46,6 @@ interface PaginatedResult<T> {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function StatusBadge({ status }: { status: string }) {
-    const map: Record<string, { label: string; cls: string; Icon: React.ComponentType<{ className?: string }> }> = {
-        completed: { label: 'Completed', cls: 'bg-green-100 text-green-700',  Icon: CheckCircle },
-        processed: { label: 'Processed', cls: 'bg-green-100 text-green-700',  Icon: CheckCircle },
-        failed:    { label: 'Failed',    cls: 'bg-red-100 text-red-700',      Icon: XCircle },
-        running:   { label: 'Running',   cls: 'bg-blue-100 text-blue-700',    Icon: RefreshCw },
-        pending:   { label: 'Pending',   cls: 'bg-zinc-100 text-zinc-600',    Icon: Clock },
-    };
-    const { label, cls, Icon } = map[status] ?? { label: status, cls: 'bg-zinc-100 text-zinc-600', Icon: Clock };
-    return (
-        <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${cls}`}>
-            <Icon className="h-3 w-3" />
-            {label}
-        </span>
-    );
-}
-
 function formatDuration(secs: number | null): string {
     if (secs === null) return '—';
     if (secs < 60) return `${secs}s`;
@@ -67,8 +55,26 @@ function formatDuration(secs: number | null): string {
 const formatTs = formatDatetime;
 
 function shortJobType(jobType: string): string {
-    // Strip namespace: "App\Jobs\SyncStoreOrdersJob" → "SyncStoreOrdersJob"
     return jobType.split('\\').pop() ?? jobType;
+}
+
+// ─── Queue badge ──────────────────────────────────────────────────────────────
+
+const QUEUE_COLORS: Record<string, string> = {
+    critical: 'bg-red-50 text-red-700 ring-red-200',
+    high:     'bg-orange-50 text-orange-700 ring-orange-200',
+    default:  'bg-blue-50 text-blue-700 ring-blue-200',
+    low:      'bg-zinc-100 text-zinc-600 ring-zinc-200',
+};
+
+function QueueBadge({ queue }: { queue: string | null }) {
+    if (!queue) return <span className="text-zinc-300">—</span>;
+    const cls = QUEUE_COLORS[queue] ?? QUEUE_COLORS.low;
+    return (
+        <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset ${cls}`}>
+            {queue}
+        </span>
+    );
 }
 
 // ─── Pagination ───────────────────────────────────────────────────────────────
@@ -121,6 +127,7 @@ function SyncLogsTab({
     onFilter: (f: Partial<{ status: string; search: string; tab: string }>) => void;
 }) {
     const [search, setSearch] = useState(filters.search);
+    const [expandedId, setExpandedId] = useState<number | null>(null);
 
     return (
         <div className="space-y-4">
@@ -131,13 +138,13 @@ function SyncLogsTab({
                     onChange={(e) => setSearch(e.target.value)}
                     onKeyDown={(e) => e.key === 'Enter' && onFilter({ search, tab: 'sync' })}
                     placeholder="Search job type or error…"
-                    className="rounded-lg border border-zinc-200 px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                    className="rounded-lg border border-zinc-200 px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-primary"
                 />
-                {['', 'running', 'completed', 'failed'].map((s) => (
+                {['', 'queued', 'running', 'completed', 'failed'].map((s) => (
                     <button
                         key={s}
                         onClick={() => onFilter({ status: s, tab: 'sync' })}
-                        className={`rounded-lg border px-3 py-1.5 text-sm transition-colors ${filters.status === s ? 'border-indigo-600 bg-indigo-50 text-indigo-700' : 'border-zinc-200 text-zinc-600 hover:bg-zinc-50'}`}
+                        className={`rounded-lg border px-3 py-1.5 text-sm transition-colors ${filters.status === s ? 'border-primary bg-primary/10 text-primary' : 'border-zinc-200 text-zinc-600 hover:bg-zinc-50'}`}
                     >
                         {s === '' ? 'All' : s.charAt(0).toUpperCase() + s.slice(1)}
                     </button>
@@ -152,44 +159,81 @@ function SyncLogsTab({
                             <th className="px-4 py-2.5 text-left">Job</th>
                             <th className="px-4 py-2.5 text-left">Workspace</th>
                             <th className="px-4 py-2.5 text-left">Status</th>
+                            <th className="px-4 py-2.5 text-left">Queue</th>
+                            <th className="px-4 py-2.5 text-left">Attempt</th>
                             <th className="px-4 py-2.5 text-left">Records</th>
                             <th className="px-4 py-2.5 text-left">Duration</th>
-                            <th className="px-4 py-2.5 text-left">Started</th>
+                            <th className="px-4 py-2.5 text-left">Started / Scheduled</th>
                         </tr>
                     </thead>
                     <tbody className="divide-y divide-zinc-100">
                         {data.data.length === 0 && (
                             <tr>
-                                <td colSpan={6} className="px-4 py-8 text-center text-zinc-400">No logs found.</td>
+                                <td colSpan={8} className="px-4 py-8 text-center text-zinc-400">No logs found.</td>
                             </tr>
                         )}
-                        {data.data.map((log) => (
-                            <tr key={log.id} className="hover:bg-zinc-50">
-                                <td className="px-4 py-2.5">
-                                    <span className="font-mono text-xs text-zinc-700">{shortJobType(log.job_type)}</span>
-                                </td>
-                                <td className="px-4 py-2.5 text-zinc-600">
-                                    {log.workspace?.name ?? <span className="text-zinc-300">—</span>}
-                                </td>
-                                <td className="px-4 py-2.5">
-                                    <StatusBadge status={log.status} />
-                                </td>
-                                <td className="px-4 py-2.5 text-zinc-600">
-                                    {log.records_processed ?? '—'}
-                                </td>
-                                <td className="px-4 py-2.5 text-zinc-600">
-                                    {formatDuration(log.duration_seconds)}
-                                </td>
-                                <td className="px-4 py-2.5 text-zinc-500 text-xs">
-                                    {formatTs(log.started_at ?? log.created_at)}
-                                    {log.status === 'failed' && log.error_message && (
-                                        <div className="mt-0.5 max-w-xs truncate text-red-600" title={log.error_message}>
-                                            {log.error_message}
-                                        </div>
+                        {data.data.map((log) => {
+                            const isExpanded = expandedId === log.id;
+                            const hasError = !!log.error_message;
+                            // For queued rows show scheduled_at, otherwise started_at
+                            const timeLabel = log.status === 'queued'
+                                ? (log.scheduled_at ?? log.created_at)
+                                : (log.started_at ?? log.created_at);
+
+                            return (
+                                <>
+                                    <tr
+                                        key={log.id}
+                                        onClick={() => hasError && setExpandedId(isExpanded ? null : log.id)}
+                                        className={`${hasError ? 'cursor-pointer' : ''} hover:bg-zinc-50`}
+                                    >
+                                        <td className="px-4 py-2.5">
+                                            <span className="font-mono text-xs text-zinc-700">{shortJobType(log.job_type)}</span>
+                                        </td>
+                                        <td className="px-4 py-2.5 text-zinc-600">
+                                            {log.workspace?.name ?? <span className="text-zinc-300">—</span>}
+                                        </td>
+                                        <td className="px-4 py-2.5">
+                                            <StatusBadge status={log.status} />
+                                        </td>
+                                        <td className="px-4 py-2.5">
+                                            <QueueBadge queue={log.queue} />
+                                        </td>
+                                        <td className="px-4 py-2.5 text-zinc-500 text-xs">
+                                            {log.attempt > 1
+                                                ? <span className="font-medium text-amber-600">#{log.attempt}</span>
+                                                : <span className="text-zinc-400">#{log.attempt}</span>
+                                            }
+                                        </td>
+                                        <td className="px-4 py-2.5 text-zinc-600">
+                                            {log.records_processed ?? '—'}
+                                        </td>
+                                        <td className="px-4 py-2.5 text-zinc-600">
+                                            {formatDuration(log.duration_seconds)}
+                                        </td>
+                                        <td className="px-4 py-2.5 text-zinc-500 text-xs">
+                                            <span className={log.status === 'queued' ? 'text-amber-600' : ''}>
+                                                {formatTs(timeLabel)}
+                                            </span>
+                                            {log.status === 'failed' && log.error_message && (
+                                                <div className="mt-0.5 text-xs text-zinc-400 italic">
+                                                    Click to {isExpanded ? 'collapse' : 'expand'} error
+                                                </div>
+                                            )}
+                                        </td>
+                                    </tr>
+                                    {isExpanded && log.error_message && (
+                                        <tr key={`${log.id}-error`} className="bg-red-50">
+                                            <td colSpan={8} className="px-4 py-3">
+                                                <pre className="whitespace-pre-wrap break-all font-mono text-xs text-red-700">
+                                                    {log.error_message}
+                                                </pre>
+                                            </td>
+                                        </tr>
                                     )}
-                                </td>
-                            </tr>
-                        ))}
+                                </>
+                            );
+                        })}
                     </tbody>
                 </table>
                 <Pagination
@@ -225,13 +269,13 @@ function WebhookLogsTab({
                     onChange={(e) => setSearch(e.target.value)}
                     onKeyDown={(e) => e.key === 'Enter' && onFilter({ search, tab: 'webhook' })}
                     placeholder="Search event or error…"
-                    className="rounded-lg border border-zinc-200 px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                    className="rounded-lg border border-zinc-200 px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-primary"
                 />
                 {['', 'pending', 'processed', 'failed'].map((s) => (
                     <button
                         key={s}
                         onClick={() => onFilter({ status: s, tab: 'webhook' })}
-                        className={`rounded-lg border px-3 py-1.5 text-sm transition-colors ${filters.status === s ? 'border-indigo-600 bg-indigo-50 text-indigo-700' : 'border-zinc-200 text-zinc-600 hover:bg-zinc-50'}`}
+                        className={`rounded-lg border px-3 py-1.5 text-sm transition-colors ${filters.status === s ? 'border-primary bg-primary/10 text-primary' : 'border-zinc-200 text-zinc-600 hover:bg-zinc-50'}`}
                     >
                         {s === '' ? 'All' : s.charAt(0).toUpperCase() + s.slice(1)}
                     </button>
@@ -314,9 +358,19 @@ export default function Logs({
 }>) {
     const activeTab = filters.tab === 'webhook' ? 'webhook' : 'sync';
     const [refreshing, setRefreshing] = useState(false);
+    const [clearing, setClearing] = useState(false);
 
     const applyFilter = (updates: Record<string, unknown>) => {
         router.get('/admin/logs', { ...filters, ...updates }, { preserveState: true, preserveScroll: true });
+    };
+
+    const clearLogs = () => {
+        if (!confirm(`Delete all ${activeTab} logs? This cannot be undone.`)) return;
+        setClearing(true);
+        router.delete('/admin/logs', {
+            data: { type: activeTab },
+            onFinish: () => setClearing(false),
+        });
     };
 
     const refresh = useCallback(() => {
@@ -336,14 +390,30 @@ export default function Logs({
 
             <div className="mb-4 flex items-start justify-between gap-4">
                 <PageHeader title="Logs" subtitle="Sync job logs and webhook delivery logs across all workspaces" />
-                <button
-                    onClick={refresh}
-                    disabled={refreshing}
-                    className="mt-1 flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-sm text-zinc-600 hover:bg-zinc-50 disabled:opacity-50"
-                >
-                    <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} />
-                    Refresh
-                </button>
+                <div className="mt-1 flex gap-2">
+                    <Link
+                        href="/admin/queue"
+                        className="rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-sm text-zinc-600 hover:bg-zinc-50"
+                    >
+                        Queue →
+                    </Link>
+                    <button
+                        onClick={clearLogs}
+                        disabled={clearing}
+                        className="flex items-center gap-1.5 rounded-lg border border-red-200 bg-white px-3 py-1.5 text-sm text-red-600 hover:bg-red-50 disabled:opacity-50"
+                    >
+                        <Trash2 className="h-3.5 w-3.5" />
+                        Clear logs
+                    </button>
+                    <button
+                        onClick={refresh}
+                        disabled={refreshing}
+                        className="flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-sm text-zinc-600 hover:bg-zinc-50 disabled:opacity-50"
+                    >
+                        <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+                        Refresh
+                    </button>
+                </div>
             </div>
 
             <div className="mb-4 flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-700">
@@ -360,7 +430,7 @@ export default function Logs({
                     <button
                         key={key}
                         onClick={() => applyFilter({ tab: key, status: '', search: '' })}
-                        className={`rounded-md px-4 py-1.5 text-sm font-medium transition-colors ${activeTab === key ? 'bg-indigo-600 text-white' : 'text-zinc-600 hover:bg-zinc-50'}`}
+                        className={`rounded-md px-4 py-1.5 text-sm font-medium transition-colors ${activeTab === key ? 'bg-primary text-primary-foreground' : 'text-zinc-600 hover:bg-zinc-50'}`}
                     >
                         {label}
                     </button>

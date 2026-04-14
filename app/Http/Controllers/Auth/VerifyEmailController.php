@@ -20,14 +20,14 @@ class VerifyEmailController extends Controller
      *
      * After verification: if an invitation token was stored in session (new user
      * path per CLAUDE.md §Workspace Invitations), accept that invitation, set
-     * the active workspace, and redirect to /dashboard skipping onboarding.
+     * the active workspace, and redirect to the workspace dashboard.
      */
     public function __invoke(
         EmailVerificationRequest $request,
         AcceptWorkspaceInvitationAction $action,
     ): RedirectResponse {
         if ($request->user()->hasVerifiedEmail()) {
-            return redirect()->intended(route('dashboard', absolute: false).'?verified=1');
+            return redirect()->intended('/onboarding?verified=1');
         }
 
         if ($request->user()->markEmailAsVerified()) {
@@ -45,7 +45,8 @@ class VerifyEmailController extends Controller
                     $action->handle($invitation, $request->user());
                     $request->session()->put('active_workspace_id', $invitation->workspace_id);
 
-                    return redirect()->route('dashboard')->with('success', 'You have joined the workspace.');
+                    return $this->toDashboard($invitation->workspace_id)
+                        ->with('success', 'You have joined the workspace.');
                 } catch (\RuntimeException $e) {
                     Log::warning('Invitation acceptance failed after email verification', [
                         'user_id'    => $request->user()->id,
@@ -56,13 +57,13 @@ class VerifyEmailController extends Controller
             }
         }
 
-        // No invitation processed — redirect to onboarding if the user has no workspace yet
+        // No invitation processed — redirect to onboarding; it forwards to dashboard if ready.
         $hasWorkspace = WorkspaceUser::where('user_id', $request->user()->id)->exists();
 
         if (! $hasWorkspace) {
             return redirect()->route('onboarding');
         }
 
-        return redirect()->intended(route('dashboard', absolute: false).'?verified=1');
+        return redirect()->intended('/onboarding?verified=1');
     }
 }

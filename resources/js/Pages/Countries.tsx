@@ -59,8 +59,8 @@ interface Props {
 function SortIcon({ column, sortBy, sortDir }: { column: SortBy; sortBy: SortBy; sortDir: SortDir }) {
     if (column !== sortBy) return <ArrowUpDown className="ml-1 h-3.5 w-3.5 opacity-40" />;
     return sortDir === 'asc'
-        ? <ArrowUp className="ml-1 h-3.5 w-3.5 text-indigo-600" />
-        : <ArrowDown className="ml-1 h-3.5 w-3.5 text-indigo-600" />;
+        ? <ArrowUp className="ml-1 h-3.5 w-3.5 text-primary" />
+        : <ArrowDown className="ml-1 h-3.5 w-3.5 text-primary" />;
 }
 
 export default function Countries({
@@ -100,10 +100,11 @@ export default function Countries({
     const selectedName = selected_country ? (COUNTRY_NAMES[selected_country] ?? selected_country) : null;
 
     return (
-        <AppLayout dateRangePicker={<><DateRangePicker /><StoreFilter selectedStoreIds={store_ids} /></>}>
+        <AppLayout dateRangePicker={<DateRangePicker />}>
             <Head title="Analytics — By Country" />
             <PageHeader title="Analytics" subtitle="Revenue by country" />
             <AnalyticsTabBar />
+            <StoreFilter selectedStoreIds={store_ids} />
 
             {navigating ? (
                 <div className="space-y-2">
@@ -161,12 +162,12 @@ export default function Countries({
                                             onClick={() => selectCountry(code)}
                                             className={cn(
                                                 'cursor-pointer transition-colors',
-                                                isActive ? 'bg-indigo-50' : 'hover:bg-zinc-50',
+                                                isActive ? 'bg-primary/10' : 'hover:bg-zinc-50',
                                             )}
                                         >
                                             <td className="px-4 py-3 text-zinc-400 tabular-nums">{index + 1}</td>
                                             <td className="px-4 py-3">
-                                                <div className={cn('font-medium', isActive ? 'text-indigo-700' : 'text-zinc-900')}>
+                                                <div className={cn('font-medium', isActive ? 'text-primary' : 'text-zinc-900')}>
                                                     {COUNTRY_NAMES[code] ?? code}
                                                 </div>
                                                 <div className="text-xs text-zinc-400">{code}</div>
@@ -175,7 +176,7 @@ export default function Countries({
                                                 <div className="flex items-center gap-2">
                                                     <div className="w-24 h-1.5 rounded-full bg-zinc-100 overflow-hidden">
                                                         <div
-                                                            className={cn('h-full rounded-full', isActive ? 'bg-indigo-500' : 'bg-indigo-400')}
+                                                            className={cn('h-full rounded-full', isActive ? 'bg-primary' : 'bg-primary/60')}
                                                             style={{ width: `${Math.min(row.share, 100)}%` }}
                                                         />
                                                     </div>

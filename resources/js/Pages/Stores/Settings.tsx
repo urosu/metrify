@@ -1,24 +1,29 @@
 import { useEffect } from 'react';
 import { Head, useForm, usePage, router } from '@inertiajs/react';
+import { wurl } from '@/lib/workspace-url';
 import AppLayout from '@/Components/layouts/AppLayout';
 import { StoreLayout } from '@/Components/layouts/StoreLayout';
 import type { StoreData } from '@/Components/layouts/StoreLayout';
 import type { PageProps } from '@/types';
+import { TimezoneSelect } from '@/Components/shared/TimezoneSelect';
 
 interface Props extends PageProps {
     store: StoreData;
 }
 
-export default function StoreSettings({ store }: Props) {
-    const { flash } = usePage<PageProps>().props;
+// ── Main component ────────────────────────────────────────────────────────────
 
+export default function StoreSettings({ store }: Props) {
+    const { flash, workspace } = usePage<PageProps>().props;
+    const w = (path: string) => wurl(workspace?.slug, path);
+
+    // ── General settings form ──────────────────────────────────────────────────
     const { data, setData, patch, processing, errors, reset } = useForm({
         name:     store.name,
         slug:     store.slug,
         timezone: store.timezone,
     });
 
-    // Reset form if store props change (e.g. after slug redirect)
     useEffect(() => {
         reset();
         setData({ name: store.name, slug: store.slug, timezone: store.timezone });
@@ -27,12 +32,12 @@ export default function StoreSettings({ store }: Props) {
 
     function handleSubmit(e: React.FormEvent) {
         e.preventDefault();
-        patch(`/stores/${store.slug}/settings`);
+        patch(w(`/stores/${store.slug}/settings`));
     }
 
     function handleRemove() {
         if (!confirm(`Remove "${store.name}"?\n\nThis will permanently delete all data for this store — orders, snapshots, and products. This cannot be undone.`)) return;
-        router.delete(`/settings/integrations/stores/${store.slug}`);
+        router.delete(w(`/settings/integrations/stores/${store.slug}`));
     }
 
     return (
@@ -62,7 +67,7 @@ export default function StoreSettings({ store }: Props) {
                                     type="text"
                                     value={data.name}
                                     onChange={(e) => setData('name', e.target.value)}
-                                    className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                                    className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
                                 />
                                 {errors.name && (
                                     <p className="mt-1 text-xs text-red-600">{errors.name}</p>
@@ -75,7 +80,7 @@ export default function StoreSettings({ store }: Props) {
                                     URL identifier
                                 </label>
                                 <div className="flex items-center rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm">
-                                    <span className="shrink-0 text-zinc-400">/stores/</span>
+                                    <span className="shrink-0 text-zinc-400">{w('/stores/')}</span>
                                     <input
                                         type="text"
                                         value={data.slug}
@@ -97,18 +102,15 @@ export default function StoreSettings({ store }: Props) {
                                 <label className="mb-1.5 block text-xs font-medium text-zinc-500">
                                     Timezone
                                 </label>
-                                <input
-                                    type="text"
+                                <TimezoneSelect
                                     value={data.timezone}
-                                    onChange={(e) => setData('timezone', e.target.value)}
-                                    placeholder="Europe/Berlin"
-                                    className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                                    onChange={(tz) => setData('timezone', tz)}
                                 />
                                 {errors.timezone ? (
                                     <p className="mt-1 text-xs text-red-600">{errors.timezone}</p>
                                 ) : (
                                     <p className="mt-1 text-xs text-zinc-400">
-                                        IANA timezone (e.g. Europe/Berlin, America/New_York). Used for displaying hourly data.
+                                        Used for displaying hourly data.
                                     </p>
                                 )}
                             </div>
@@ -137,7 +139,7 @@ export default function StoreSettings({ store }: Props) {
                                 <button
                                     type="submit"
                                     disabled={processing}
-                                    className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-60"
+                                    className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-60"
                                 >
                                     {processing ? 'Saving…' : 'Save changes'}
                                 </button>

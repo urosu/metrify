@@ -1,4 +1,4 @@
-import GuestLayout from '@/Layouts/GuestLayout';
+import AuthLayout from '@/Components/layouts/AuthLayout';
 import { PageProps } from '@/types';
 import { Head, Link, useForm } from '@inertiajs/react';
 
@@ -12,7 +12,7 @@ export default function NoWorkspace({ auth }: PageProps) {
     };
 
     return (
-        <GuestLayout>
+        <AuthLayout>
             <Head title="No Workspace" />
 
             <div className="text-center">
@@ -42,7 +42,7 @@ export default function NoWorkspace({ auth }: PageProps) {
                         <div className="mt-6">
                             <Link
                                 href={route('onboarding')}
-                                className="inline-flex items-center rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2"
+                                className="inline-flex items-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2"
                             >
                                 Connect a store
                             </Link>
@@ -58,7 +58,7 @@ export default function NoWorkspace({ auth }: PageProps) {
                         <div className="mt-6 flex flex-col items-center gap-3">
                             <Link
                                 href={route('verification.notice')}
-                                className="inline-flex items-center rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-indigo-700"
+                                className="inline-flex items-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-primary/90"
                             >
                                 Go to email verification
                             </Link>
@@ -73,6 +73,6 @@ export default function NoWorkspace({ auth }: PageProps) {
                     </>
                 )}
             </div>
-        </GuestLayout>
+        </AuthLayout>
     );
 }

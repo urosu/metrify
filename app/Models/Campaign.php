@@ -22,7 +22,25 @@ class Campaign extends Model
         'name',
         'status',
         'objective',
+        'daily_budget',
+        'lifetime_budget',
+        'budget_type',
+        'bid_strategy',
+        'target_value',
+        'target_roas',
+        'target_cpo',
     ];
+
+    protected function casts(): array
+    {
+        return [
+            'daily_budget' => 'decimal:2',
+            'lifetime_budget' => 'decimal:2',
+            'target_value' => 'decimal:2',
+            'target_roas' => 'decimal:2',
+            'target_cpo' => 'decimal:2',
+        ];
+    }
 
     public function workspace(): BelongsTo
     {

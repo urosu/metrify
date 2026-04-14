@@ -19,8 +19,18 @@ class Ad extends Model
         'external_id',
         'name',
         'status',
+        'effective_status',
         'destination_url',
+        'creative_data',
+        'creative_data_api_version',
     ];
+
+    protected function casts(): array
+    {
+        return [
+            'creative_data' => 'array',
+        ];
+    }
 
     public function workspace(): BelongsTo
     {

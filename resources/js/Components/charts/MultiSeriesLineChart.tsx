@@ -19,9 +19,23 @@ export interface MultiSeriesPoint {
     aov: number | null;
     roas: number | null;
     ad_spend: number | null;
+    /** GSC aggregate clicks (device='all', country='ZZ') — null for hourly granularity */
+    gsc_clicks: number | null;
 }
 
-type SeriesKey = 'revenue' | 'orders' | 'aov' | 'roas' | 'ad_spend';
+export interface HolidayOverlay {
+    date: string;
+    name: string;
+}
+
+export interface WorkspaceEventOverlay {
+    date_from: string;
+    date_to: string;
+    name: string;
+    event_type: string;
+}
+
+type SeriesKey = 'revenue' | 'orders' | 'aov' | 'roas' | 'ad_spend' | 'gsc_clicks';
 
 interface SeriesConfig {
     key: SeriesKey;
@@ -33,20 +47,25 @@ interface SeriesConfig {
 }
 
 const SERIES: SeriesConfig[] = [
-    { key: 'revenue',  label: 'Revenue',   color: '#4f46e5', yAxis: 'left',  valueType: 'currency' },
-    { key: 'orders',   label: 'Orders',    color: '#0891b2', yAxis: 'right', valueType: 'number'   },
-    { key: 'aov',      label: 'AOV',       color: '#059669', yAxis: 'left',  valueType: 'currency' },
-    { key: 'ad_spend', label: 'Ad Spend',  color: '#dc2626', yAxis: 'left',  valueType: 'currency' },
-    { key: 'roas',     label: 'ROAS',      color: '#d97706', yAxis: 'right', valueType: 'ratio'    },
+    { key: 'revenue',    label: 'Revenue',    color: 'var(--chart-1)', yAxis: 'left',  valueType: 'currency' },
+    { key: 'orders',     label: 'Orders',     color: 'var(--chart-5)', yAxis: 'right', valueType: 'number'   },
+    { key: 'aov',        label: 'AOV',        color: 'var(--chart-2)', yAxis: 'left',  valueType: 'currency' },
+    { key: 'ad_spend',   label: 'Ad Spend',   color: 'var(--chart-3)', yAxis: 'left',  valueType: 'currency' },
+    { key: 'roas',       label: 'ROAS',       color: 'var(--chart-4)', yAxis: 'right', valueType: 'ratio'    },
+    { key: 'gsc_clicks', label: 'GSC Clicks', color: 'var(--chart-2)', yAxis: 'right', valueType: 'number'   },
 ];
 
-interface NoteMarkerProps {
+// ─── Overlay colors ────────────────────────────────────────────────────────────
+// holiday: gray (#a1a1aa), promotion/workspace_event: blue (#3b82f6), note: amber (#f59e0b)
+
+interface OverlayMarkerProps {
     viewBox?: { x: number; y: number; width: number; height: number };
-    note: string;
-    onHoverChange: (state: { note: string; x: number; y: number } | null) => void;
+    label: string;
+    color: string;
+    onHoverChange: (state: { label: string; x: number; y: number } | null) => void;
 }
 
-function NoteMarker({ viewBox, note, onHoverChange }: NoteMarkerProps) {
+function OverlayMarker({ viewBox, label, color, onHoverChange }: OverlayMarkerProps) {
     if (!viewBox) return null;
     const cx = viewBox.x + viewBox.width / 2;
     const cy = viewBox.y;
@@ -55,9 +74,9 @@ function NoteMarker({ viewBox, note, onHoverChange }: NoteMarkerProps) {
             cx={cx}
             cy={cy + 6}
             r={5}
-            fill="#f59e0b"
+            fill={color}
             style={{ cursor: 'default' }}
-            onMouseEnter={() => onHoverChange({ note, x: cx, y: cy + 6 })}
+            onMouseEnter={() => onHoverChange({ label, x: cx, y: cy + 6 })}
             onMouseLeave={() => onHoverChange(null)}
         />
     );
@@ -69,6 +88,10 @@ interface Props {
     comparisonData?: MultiSeriesPoint[];
     /** Annotate specific dates with a subtle reference line + amber marker */
     notes?: Array<{ date: string; note: string }>;
+    /** Public holidays for workspace's country — gray vertical line markers */
+    holidays?: HolidayOverlay[];
+    /** Manual promotions / expected spikes created by user — blue markers / shaded areas */
+    workspaceEvents?: WorkspaceEventOverlay[];
     granularity: Granularity;
     currency?: string;
     timezone?: string;
@@ -91,13 +114,19 @@ const MultiSeriesLineChartInner = React.memo(function MultiSeriesLineChartInner(
     data,
     comparisonData,
     notes,
+    holidays,
+    workspaceEvents,
     granularity,
     currency = 'EUR',
     timezone,
     className,
 }: Props) {
     const [visible, setVisible] = useState<Set<SeriesKey>>(new Set(['revenue']));
-    const [hoveredNote, setHoveredNote] = useState<{ note: string; x: number; y: number } | null>(null);
+    const [hoveredOverlay, setHoveredOverlay] = useState<{ label: string; x: number; y: number } | null>(null);
+
+    // Overlay visibility toggles
+    const [showHolidays, setShowHolidays]           = useState(true);
+    const [showWorkspaceEvents, setShowWorkspaceEvents] = useState(true);
 
     // Zoom state
     const [refAreaLeft, setRefAreaLeft]   = useState<string | null>(null);
@@ -196,9 +225,30 @@ const MultiSeriesLineChartInner = React.memo(function MultiSeriesLineChartInner(
     const leftSeries  = SERIES.filter((s) => s.yAxis === 'left');
     const rightSeries = SERIES.filter((s) => s.yAxis === 'right');
 
+    // Clamp event dates to visible data range when zoomed
+    const displayFrom = displayData[0]?.date;
+    const displayTo   = displayData[displayData.length - 1]?.date;
+
+    const visibleHolidays = useMemo(() => {
+        if (!holidays?.length) return [];
+        if (!displayFrom || !displayTo) return holidays;
+        return holidays.filter((h) => h.date >= displayFrom && h.date <= displayTo);
+    }, [holidays, displayFrom, displayTo]);
+
+    const visibleEvents = useMemo(() => {
+        if (!workspaceEvents?.length) return [];
+        if (!displayFrom || !displayTo) return workspaceEvents;
+        return workspaceEvents.filter(
+            (e) => e.date_from <= displayTo && e.date_to >= displayFrom,
+        );
+    }, [workspaceEvents, displayFrom, displayTo]);
+
+    const hasHolidayOverlays      = (holidays?.length ?? 0) > 0;
+    const hasWorkspaceEventOverlays = (workspaceEvents?.length ?? 0) > 0;
+
     return (
         <div className={className ?? 'w-full'}>
-            {/* Series toggle pills + zoom reset */}
+            {/* Series toggle pills + overlay toggles + zoom reset */}
             <div className="mb-3 flex flex-wrap items-center gap-1.5">
                 {SERIES.map((s) => {
                     const on = visible.has(s.key);
@@ -221,6 +271,35 @@ const MultiSeriesLineChartInner = React.memo(function MultiSeriesLineChartInner(
                         </button>
                     );
                 })}
+
+                {/* Overlay toggles — only shown when there's relevant data */}
+                {hasHolidayOverlays && (
+                    <button
+                        onClick={() => setShowHolidays((v) => !v)}
+                        className={`flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium transition-colors ${
+                            showHolidays
+                                ? 'border-zinc-300 bg-zinc-100 text-zinc-600'
+                                : 'border-zinc-200 bg-white text-zinc-400 hover:text-zinc-600'
+                        }`}
+                    >
+                        <span className="h-1.5 w-1.5 rounded-full bg-zinc-400" />
+                        Holidays
+                    </button>
+                )}
+                {hasWorkspaceEventOverlays && (
+                    <button
+                        onClick={() => setShowWorkspaceEvents((v) => !v)}
+                        className={`flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium transition-colors ${
+                            showWorkspaceEvents
+                                ? 'border-blue-300 bg-blue-50 text-blue-700'
+                                : 'border-zinc-200 bg-white text-zinc-400 hover:text-zinc-600'
+                        }`}
+                    >
+                        <span className="h-1.5 w-1.5 rounded-full bg-blue-400" />
+                        Promotions
+                    </button>
+                )}
+
                 {comparisonData?.length && (
                     <span className="flex items-center gap-1.5 rounded-full border border-zinc-200 bg-white px-2.5 py-0.5 text-xs text-zinc-400">
                         <span className="inline-block h-0 w-3 border-t-2 border-dashed border-zinc-400" />
@@ -230,7 +309,7 @@ const MultiSeriesLineChartInner = React.memo(function MultiSeriesLineChartInner(
                 {zoomedIndices && (
                     <button
                         onClick={resetZoom}
-                        className="ml-auto rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-0.5 text-xs font-medium text-indigo-600 hover:bg-indigo-100 transition-colors"
+                        className="ml-auto rounded-full border border-primary/20 bg-primary/10 px-2.5 py-0.5 text-xs font-medium text-primary hover:bg-primary/15 transition-colors"
                     >
                         Reset zoom
                     </button>
@@ -241,15 +320,16 @@ const MultiSeriesLineChartInner = React.memo(function MultiSeriesLineChartInner(
                 className="relative h-64"
                 style={{ userSelect: isSelecting ? 'none' : undefined }}
             >
-                {hoveredNote && (
+                {/* Overlay tooltip — shown on hover of any marker */}
+                {hoveredOverlay && (
                     <div
                         className="pointer-events-none absolute z-10 max-w-[220px] -translate-x-1/2 -translate-y-full rounded border border-zinc-200 bg-white px-2.5 py-1.5 text-xs text-zinc-700 shadow-md"
-                        style={{ left: hoveredNote.x, top: hoveredNote.y - 10 }}
+                        style={{ left: hoveredOverlay.x, top: hoveredOverlay.y - 10 }}
                     >
-                        {hoveredNote.note}
+                        {hoveredOverlay.label}
                     </div>
                 )}
-                <ResponsiveContainer width="100%" height="100%">
+                <ResponsiveContainer width="100%" height="100%" minWidth={0} initialDimension={{ width: 0, height: 1 }}>
                     <LineChart
                         data={merged}
                         margin={{ top: 4, right: hasRight ? 56 : 8, left: 0, bottom: 0 }}
@@ -339,10 +419,107 @@ const MultiSeriesLineChartInner = React.memo(function MultiSeriesLineChartInner(
                                 x1={refAreaLeft}
                                 x2={refAreaRight}
                                 strokeOpacity={0.3}
-                                fill="#4f46e5"
+                                fill="var(--chart-1)"
                                 fillOpacity={0.1}
                             />
                         )}
+
+                        {/* ── Holiday overlays — gray dashed vertical lines ───────────── */}
+                        {showHolidays && visibleHolidays.map(({ date, name }) => (
+                            <ReferenceLine
+                                key={`holiday-${date}`}
+                                x={date}
+                                yAxisId="left"
+                                stroke="#a1a1aa"
+                                strokeDasharray="3 3"
+                                strokeWidth={1}
+                                label={(props: object) => (
+                                    <OverlayMarker
+                                        {...(props as OverlayMarkerProps)}
+                                        label={name}
+                                        color="#a1a1aa"
+                                        onHoverChange={setHoveredOverlay}
+                                    />
+                                )}
+                            />
+                        ))}
+
+                        {/* ── Workspace event overlays — blue shaded areas or lines ──── */}
+                        {showWorkspaceEvents && visibleEvents.map((event) => {
+                            const isSingleDay = event.date_from === event.date_to;
+                            const label = `${event.name}${event.event_type !== 'promotion' ? ` (${event.event_type.replace(/_/g, ' ')})` : ''}`;
+
+                            if (isSingleDay) {
+                                return (
+                                    <ReferenceLine
+                                        key={`event-${event.date_from}-${event.name}`}
+                                        x={event.date_from}
+                                        yAxisId="left"
+                                        stroke="#3b82f6"
+                                        strokeDasharray="3 3"
+                                        strokeWidth={1.5}
+                                        label={(props: object) => (
+                                            <OverlayMarker
+                                                {...(props as OverlayMarkerProps)}
+                                                label={label}
+                                                color="#3b82f6"
+                                                onHoverChange={setHoveredOverlay}
+                                            />
+                                        )}
+                                    />
+                                );
+                            }
+
+                            // Multi-day event: shaded reference area + marker at start
+                            return (
+                                <React.Fragment key={`event-${event.date_from}-${event.name}`}>
+                                    <ReferenceArea
+                                        yAxisId="left"
+                                        x1={event.date_from}
+                                        x2={event.date_to}
+                                        fill="#3b82f6"
+                                        fillOpacity={0.06}
+                                        stroke="#3b82f6"
+                                        strokeOpacity={0.2}
+                                    />
+                                    <ReferenceLine
+                                        x={event.date_from}
+                                        yAxisId="left"
+                                        stroke="#3b82f6"
+                                        strokeDasharray="3 3"
+                                        strokeWidth={1.5}
+                                        label={(props: object) => (
+                                            <OverlayMarker
+                                                {...(props as OverlayMarkerProps)}
+                                                label={label}
+                                                color="#3b82f6"
+                                                onHoverChange={setHoveredOverlay}
+                                            />
+                                        )}
+                                    />
+                                </React.Fragment>
+                            );
+                        })}
+
+                        {/* ── Daily note overlays — amber dashed lines ────────────────── */}
+                        {notes?.map(({ date, note }) => (
+                            <ReferenceLine
+                                key={`note-${date}`}
+                                x={date}
+                                yAxisId="left"
+                                stroke="#d4d4d8"
+                                strokeDasharray="3 3"
+                                strokeWidth={1}
+                                label={(props: object) => (
+                                    <OverlayMarker
+                                        {...(props as OverlayMarkerProps)}
+                                        label={note}
+                                        color="#f59e0b"
+                                        onHoverChange={setHoveredOverlay}
+                                    />
+                                )}
+                            />
+                        ))}
 
                         {/* Comparison lines — one per visible series */}
                         {comparisonData?.length && SERIES.map((s) =>
@@ -378,23 +555,6 @@ const MultiSeriesLineChartInner = React.memo(function MultiSeriesLineChartInner(
                                 />
                             ) : null,
                         )}
-                        {notes?.map(({ date, note }) => (
-                            <ReferenceLine
-                                key={date}
-                                x={date}
-                                yAxisId="left"
-                                stroke="#d4d4d8"
-                                strokeDasharray="3 3"
-                                strokeWidth={1}
-                                label={(props: object) => (
-                                        <NoteMarker
-                                            {...(props as NoteMarkerProps)}
-                                            note={note}
-                                            onHoverChange={setHoveredNote}
-                                        />
-                                    )}
-                            />
-                        ))}
                     </LineChart>
                 </ResponsiveContainer>
             </div>

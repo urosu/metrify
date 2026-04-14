@@ -24,6 +24,7 @@ class DispatchHourlySnapshots
             ->join('workspaces', 'stores.workspace_id', '=', 'workspaces.id')
             ->where('stores.status', 'active')
             ->whereNull('workspaces.deleted_at')
+            ->whereRaw('NOT (workspaces.trial_ends_at < NOW() AND workspaces.billing_plan IS NULL)')
             ->select(['stores.id', 'stores.workspace_id'])
             ->each(static function (Store $store) use ($yesterday): void {
                 ComputeHourlySnapshotsJob::dispatch($store->id, $yesterday);

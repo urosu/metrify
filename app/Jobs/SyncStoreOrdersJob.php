@@ -4,24 +4,19 @@ declare(strict_types=1);
 
 namespace App\Jobs;
 
-use App\Actions\UpsertWooCommerceOrderAction;
-use App\Exceptions\WooCommerceConnectionException;
 use App\Exceptions\WooCommerceRateLimitException;
 use App\Models\Alert;
 use App\Models\Store;
 use App\Models\SyncLog;
 use App\Models\WebhookLog;
 use App\Models\Workspace;
-use App\Scopes\WorkspaceScope;
-use App\Services\Integrations\WooCommerce\WooCommerceClient;
+use App\Services\Integrations\WooCommerce\WooCommerceConnector;
 use App\Services\WorkspaceContext;
-use Carbon\Carbon;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
-use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
@@ -45,6 +40,8 @@ use Illuminate\Support\Facades\Log;
  *   - Sets store status to 'error' at 3+ consecutive failures.
  *   - Resets on success: consecutive_sync_failures → 0,
  *     store status → 'active' ONLY if it was previously 'error'.
+ *
+ * Related: app/Services/Integrations/WooCommerce/WooCommerceConnector.php
  */
 class SyncStoreOrdersJob implements ShouldQueue
 {
@@ -61,9 +58,16 @@ class SyncStoreOrdersJob implements ShouldQueue
         $this->onQueue('default');
     }
 
-    public function handle(UpsertWooCommerceOrderAction $action): void
+    public function handle(): void
     {
         app(WorkspaceContext::class)->set($this->workspaceId);
+
+        // Discard jobs queued before trial expiry. Scheduler already filters frozen
+        // workspaces on dispatch; this guard handles jobs already in the queue.
+        if ($this->isWorkspaceFrozen()) {
+            Log::info('SyncStoreOrdersJob: skipped — workspace trial expired', ['workspace_id' => $this->workspaceId]);
+            return;
+        }
 
         $store = Store::find($this->storeId);
 
@@ -73,7 +77,7 @@ class SyncStoreOrdersJob implements ShouldQueue
 
         // Skip if webhooks are arriving — they keep the data fresh.
         // Force mode (manual sync trigger) bypasses this check.
-        if (!$this->force && $this->webhooksAreArriving($store->id)) {
+        if (! $this->force && $this->webhooksAreArriving($store->id)) {
             Log::info('SyncStoreOrdersJob: webhooks are active, skipping API fallback', [
                 'store_id' => $this->storeId,
             ]);
@@ -88,10 +92,14 @@ class SyncStoreOrdersJob implements ShouldQueue
             'status'            => 'running',
             'records_processed' => 0,
             'started_at'        => now(),
+            'queue'             => 'default',
+            'attempt'           => $this->attempts(),
         ]);
 
         try {
-            $count = $this->fetchAndUpsertRecentOrders($store, $action);
+            $connector = new WooCommerceConnector($store);
+            $since     = now()->subHours(2);
+            $count     = $connector->syncOrders($since);
 
             $syncLog->update([
                 'status'            => 'completed',
@@ -108,9 +116,9 @@ class SyncStoreOrdersJob implements ShouldQueue
             return;
         } catch (\Throwable $e) {
             $syncLog->update([
-                'status'        => 'failed',
-                'error_message' => mb_substr($e->getMessage(), 0, 500),
-                'completed_at'  => now(),
+                'status'           => 'failed',
+                'error_message'    => mb_substr($e->getMessage(), 0, 500),
+                'completed_at'     => now(),
                 'duration_seconds' => (int) max(0, (int) now()->diffInSeconds($syncLog->started_at)),
             ]);
 
@@ -132,8 +140,7 @@ class SyncStoreOrdersJob implements ShouldQueue
         try {
             app(WorkspaceContext::class)->set($this->workspaceId);
 
-            // Close any orphaned running sync logs for this store (guard against
-            // MaxAttemptsExceededException firing before handle() creates a new log).
+            // Close any orphaned running sync logs for this store.
             SyncLog::withoutGlobalScopes()
                 ->where('syncable_type', Store::class)
                 ->where('syncable_id', $this->storeId)
@@ -152,8 +159,7 @@ class SyncStoreOrdersJob implements ShouldQueue
             }
 
             $failures = $store->consecutive_sync_failures + 1;
-
-            $updates = ['consecutive_sync_failures' => $failures];
+            $updates  = ['consecutive_sync_failures' => $failures];
 
             if ($failures >= 3) {
                 $updates['status'] = 'error';
@@ -161,17 +167,15 @@ class SyncStoreOrdersJob implements ShouldQueue
 
             $store->update($updates);
 
-            $severity = $failures >= 3 ? 'critical' : 'warning';
-
             Alert::create([
                 'workspace_id' => $this->workspaceId,
                 'store_id'     => $this->storeId,
                 'type'         => 'sync_failure',
-                'severity'     => $severity,
+                'severity'     => $failures >= 3 ? 'critical' : 'warning',
                 'data'         => [
-                    'job'       => 'SyncStoreOrdersJob',
-                    'failures'  => $failures,
-                    'error'     => mb_substr($exception->getMessage(), 0, 255),
+                    'job'      => 'SyncStoreOrdersJob',
+                    'failures' => $failures,
+                    'error'    => mb_substr($exception->getMessage(), 0, 255),
                 ],
             ]);
         } catch (\Throwable $e) {
@@ -191,42 +195,12 @@ class SyncStoreOrdersJob implements ShouldQueue
      */
     private function webhooksAreArriving(int $storeId): bool
     {
-        // Use DB::table() to bypass WorkspaceScope — WebhookLog has it applied
-        // but we only need a quick existence check on a single store_id.
+        // Use DB::table() to bypass WorkspaceScope — only need a quick existence check.
         return DB::table('webhook_logs')
             ->where('store_id', $storeId)
             ->where('created_at', '>=', now()->subMinutes(90))
             ->limit(1)
             ->exists();
-    }
-
-    /**
-     * Fetch orders modified in the last 2 hours and upsert each one.
-     *
-     * @return int Number of orders processed.
-     */
-    private function fetchAndUpsertRecentOrders(Store $store, UpsertWooCommerceOrderAction $action): int
-    {
-        $consumerKey    = Crypt::decryptString($store->auth_key_encrypted);
-        $consumerSecret = Crypt::decryptString($store->auth_secret_encrypted);
-
-        $client = new WooCommerceClient(
-            domain:         $store->domain,
-            consumerKey:    $consumerKey,
-            consumerSecret: $consumerSecret,
-        );
-
-        $modifiedAfter = now()->subHours(2)->utc()->toIso8601String();
-        $orders        = $client->fetchModifiedOrders($modifiedAfter);
-
-        $workspace          = Workspace::find($this->workspaceId);
-        $reportingCurrency  = $workspace?->reporting_currency ?? 'EUR';
-
-        foreach ($orders as $wcOrder) {
-            $action->handle($store, $reportingCurrency, $wcOrder);
-        }
-
-        return count($orders);
     }
 
     /**
@@ -243,5 +217,17 @@ class SyncStoreOrdersJob implements ShouldQueue
         }
 
         $store->update($updates);
+    }
+
+    private function isWorkspaceFrozen(): bool
+    {
+        $workspace = Workspace::withoutGlobalScopes()
+            ->select(['id', 'trial_ends_at', 'billing_plan'])
+            ->find($this->workspaceId);
+
+        return $workspace !== null
+            && $workspace->trial_ends_at !== null
+            && $workspace->trial_ends_at->lt(now())
+            && $workspace->billing_plan === null;
     }
 }

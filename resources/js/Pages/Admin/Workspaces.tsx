@@ -18,7 +18,7 @@ const PLAN_LABELS: Record<string, string> = {
 const PLAN_COLORS: Record<string, string> = {
     starter:    'bg-blue-100 text-blue-700',
     growth:     'bg-violet-100 text-violet-700',
-    scale:      'bg-indigo-100 text-indigo-700',
+    scale:      'bg-primary/15 text-primary',
     percentage: 'bg-amber-100 text-amber-700',
     enterprise: 'bg-green-100 text-green-700',
 };
@@ -101,7 +101,7 @@ export default function AdminWorkspaces({ workspaces, filters }: Props) {
                     value={search}
                     onChange={(e) => handleSearch(e.target.value)}
                     placeholder="Search by name or slug…"
-                    className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 sm:max-w-xs"
+                    className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm placeholder-zinc-400 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary sm:max-w-xs"
                 />
             </div>
 
@@ -162,7 +162,7 @@ export default function AdminWorkspaces({ workspaces, filters }: Props) {
                                                 defaultValue={w.billing_plan ?? ''}
                                                 onBlur={() => setPlanEditing(null)}
                                                 onChange={(e) => setPlan(w.id, e.target.value)}
-                                                className="rounded border border-zinc-300 px-2 py-1 text-xs focus:border-indigo-500 focus:outline-none"
+                                                className="rounded border border-zinc-300 px-2 py-1 text-xs focus:border-primary focus:outline-none"
                                             >
                                                 <option value="" disabled>Select plan</option>
                                                 {PLAN_OPTIONS.map((p) => (
@@ -205,7 +205,7 @@ export default function AdminWorkspaces({ workspaces, filters }: Props) {
                                             {w.owner && !w.deleted_at && (
                                                 <button
                                                     onClick={() => impersonate(w.owner!.id)}
-                                                    className="rounded px-2 py-1 text-xs text-indigo-600 hover:bg-indigo-50 transition-colors"
+                                                    className="rounded px-2 py-1 text-xs text-primary hover:bg-primary/10 transition-colors"
                                                     title="Impersonate workspace owner"
                                                 >
                                                     View as owner

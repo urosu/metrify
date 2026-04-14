@@ -7,6 +7,7 @@ namespace App\Http\Controllers;
 use App\Models\DailyNote;
 use App\Models\Store;
 use App\Services\WorkspaceContext;
+use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 use Illuminate\Support\Facades\DB;
@@ -25,7 +26,7 @@ class AnalyticsController extends Controller
 
         $validated = $request->validate([
             'from'      => ['sometimes', 'nullable', 'date_format:Y-m-d'],
-            'to'        => ['sometimes', 'nullable', 'date_format:Y-m-d'],
+            'to'        => ['sometimes', 'nullable', 'date_format:Y-m-d', 'after_or_equal:from'],
             'store_ids' => ['sometimes', 'nullable', 'string'],
             'sort_by'   => ['sometimes', 'nullable', 'in:revenue,units'],
             'sort_dir'  => ['sometimes', 'nullable', 'in:asc,desc'],
@@ -42,33 +43,78 @@ class AnalyticsController extends Controller
             : '';
 
         $orderClause = match ($sortBy) {
-            'units'   => "ORDER BY units {$sortDir} NULLS LAST, revenue DESC NULLS LAST",
-            default   => "ORDER BY revenue {$sortDir} NULLS LAST, units DESC",
+            'units'   => "ORDER BY c.units {$sortDir} NULLS LAST, c.revenue DESC NULLS LAST",
+            default   => "ORDER BY c.revenue {$sortDir} NULLS LAST, c.units DESC",
         };
 
+        // Why: top_products JSONB dropped from daily_snapshots; query normalized table instead.
+        // See: PLANNING.md "daily_snapshot_products"
+        // Related: app/Jobs/ComputeDailySnapshotJob.php (writes this table)
+        //
+        // Previous period = same length, immediately before $from.
+        // Deltas are NULL when compare_from falls before earliest snapshot (PLANNING.md spec).
+        $periodDays  = Carbon::parse($from)->diffInDays(Carbon::parse($to)) + 1;
+        $compareTo   = Carbon::parse($from)->subDay()->toDateString();
+        $compareFrom = Carbon::parse($compareTo)->subDays($periodDays - 1)->toDateString();
+
         $rows = DB::select(
-            "SELECT
-                elem->>'external_id' AS external_id,
-                MAX(elem->>'name')   AS name,
-                SUM((elem->>'units')::integer)   AS units,
-                SUM((elem->>'revenue')::numeric) AS revenue
-            FROM daily_snapshots,
-                jsonb_array_elements(top_products) AS elem
-            WHERE workspace_id = ?
-              AND date BETWEEN ? AND ?
-              AND top_products IS NOT NULL
-              {$storeClause}
-            GROUP BY elem->>'external_id'
+            "WITH current_p AS (
+                SELECT product_external_id,
+                       MAX(product_name) AS name,
+                       SUM(units)::int   AS units,
+                       SUM(revenue)      AS revenue
+                FROM daily_snapshot_products
+                WHERE workspace_id = ?
+                  AND snapshot_date BETWEEN ? AND ?
+                  {$storeClause}
+                GROUP BY product_external_id
+            ),
+            prev_p AS (
+                SELECT product_external_id,
+                       SUM(units)::int AS prev_units,
+                       SUM(revenue)    AS prev_revenue
+                FROM daily_snapshot_products
+                WHERE workspace_id = ?
+                  AND snapshot_date BETWEEN ? AND ?
+                  {$storeClause}
+                GROUP BY product_external_id
+            ),
+            earliest AS (
+                SELECT MIN(snapshot_date) AS earliest_date
+                FROM daily_snapshot_products
+                WHERE workspace_id = ?
+                {$storeClause}
+            )
+            SELECT
+                c.product_external_id AS external_id,
+                c.name,
+                c.units,
+                c.revenue,
+                CASE
+                    WHEN e.earliest_date IS NULL OR e.earliest_date > ?::date THEN NULL
+                    WHEN p.prev_revenue IS NULL OR p.prev_revenue = 0          THEN NULL
+                    ELSE ROUND(((c.revenue - p.prev_revenue) / p.prev_revenue * 100)::numeric, 1)
+                END AS revenue_delta,
+                CASE
+                    WHEN e.earliest_date IS NULL OR e.earliest_date > ?::date THEN NULL
+                    WHEN p.prev_units IS NULL OR p.prev_units = 0              THEN NULL
+                    ELSE ROUND(((c.units - p.prev_units)::decimal / p.prev_units * 100)::numeric, 1)
+                END AS units_delta
+            FROM current_p c
+            CROSS JOIN earliest e
+            LEFT JOIN prev_p p ON p.product_external_id = c.product_external_id
             {$orderClause}
             LIMIT 50",
-            [$workspaceId, $from, $to],
+            [$workspaceId, $from, $to, $workspaceId, $compareFrom, $compareTo, $workspaceId, $compareFrom, $compareFrom],
         );
 
         $products = array_map(fn ($r) => [
-            'external_id' => $r->external_id,
-            'name'        => $r->name,
-            'units'       => (int) $r->units,
-            'revenue'     => $r->revenue !== null ? (float) $r->revenue : null,
+            'external_id'   => $r->external_id,
+            'name'          => $r->name,
+            'units'         => (int) $r->units,
+            'revenue'       => $r->revenue       !== null ? (float) $r->revenue       : null,
+            'revenue_delta' => $r->revenue_delta !== null ? (float) $r->revenue_delta : null,
+            'units_delta'   => $r->units_delta   !== null ? (float) $r->units_delta   : null,
         ], $rows);
 
         return Inertia::render('Analytics/Products', [
@@ -91,15 +137,14 @@ class AnalyticsController extends Controller
 
         $validated = $request->validate([
             'from'       => ['sometimes', 'nullable', 'date_format:Y-m-d'],
-            'to'         => ['sometimes', 'nullable', 'date_format:Y-m-d'],
+            'to'         => ['sometimes', 'nullable', 'date_format:Y-m-d', 'after_or_equal:from'],
             'store_ids'  => ['sometimes', 'nullable', 'string'],
             'sort_by'    => ['sometimes', 'nullable', 'in:date,revenue,orders,items_sold,items_per_order,aov,ad_spend,roas,marketing_pct'],
             'sort_dir'   => ['sometimes', 'nullable', 'in:asc,desc'],
             'hide_empty' => ['sometimes', 'nullable', 'in:0,1'],
         ]);
 
-        // Default: current month
-        $from      = $validated['from']       ?? now()->startOfMonth()->toDateString();
+        $from      = $validated['from']       ?? now()->subDays(29)->toDateString();
         $to        = $validated['to']         ?? now()->toDateString();
         $sortBy    = $validated['sort_by']    ?? 'date';
         $sortDir   = $validated['sort_dir']   ?? 'desc';
@@ -143,22 +188,13 @@ class AnalyticsController extends Controller
                 ->where('date', $date)
                 ->delete();
         } else {
-            $existing = DailyNote::withoutGlobalScopes()
-                ->where('workspace_id', $workspaceId)
-                ->where('date', $date)
-                ->first();
-
-            if ($existing) {
-                $existing->update(['note' => $note, 'updated_by' => $userId]);
-            } else {
-                DailyNote::withoutGlobalScopes()->create([
-                    'workspace_id' => $workspaceId,
-                    'date'         => $date,
-                    'note'         => $note,
-                    'created_by'   => $userId,
-                    'updated_by'   => $userId,
-                ]);
-            }
+            // Why: updateOrInsert avoids the race condition where two concurrent requests
+            // both pass the first() check and then both attempt create(), causing a
+            // unique-constraint violation on (workspace_id, date).
+            DailyNote::withoutGlobalScopes()->updateOrInsert(
+                ['workspace_id' => $workspaceId, 'date' => $date],
+                ['note' => $note, 'updated_by' => $userId, 'created_by' => $userId],
+            );
         }
 
         return response()->noContent();

@@ -20,8 +20,8 @@ use Illuminate\Support\Facades\DB;
  *   2. Dispatches ProcessWebhookJob to the critical queue.
  *   3. Returns 200 immediately so WooCommerce stops retrying.
  *
- * Only order.created / order.updated / order.deleted are dispatched for
- * processing. Unknown topics are acknowledged with 200 but not queued.
+ * Supported topics are dispatched for processing; unknown topics are
+ * acknowledged with 200 but not queued.
  */
 class WooCommerceWebhookController extends Controller
 {
@@ -29,6 +29,7 @@ class WooCommerceWebhookController extends Controller
         'order.created',
         'order.updated',
         'order.deleted',
+        'product.updated',
     ];
 
     public function __invoke(Request $request): JsonResponse

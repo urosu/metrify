@@ -16,9 +16,18 @@ class Alert extends Model
         'workspace_id',
         'store_id',
         'ad_account_id',
+        'property_id',
         'type',
         'severity',
+        'source',
         'data',
+        'is_silent',
+        'review_status',
+        'reviewed_at',
+        'estimated_impact_low',
+        'estimated_impact_high',
+        'gsc_conversion_rate_at_alert',
+        'store_aov_at_alert',
         'read_at',
         'resolved_at',
     ];
@@ -27,6 +36,12 @@ class Alert extends Model
     {
         return [
             'data' => 'array',
+            'is_silent' => 'boolean',
+            'reviewed_at' => 'datetime',
+            'estimated_impact_low' => 'decimal:2',
+            'estimated_impact_high' => 'decimal:2',
+            'gsc_conversion_rate_at_alert' => 'decimal:6',
+            'store_aov_at_alert' => 'decimal:2',
             'read_at' => 'datetime',
             'resolved_at' => 'datetime',
         ];
@@ -45,5 +60,10 @@ class Alert extends Model
     public function adAccount(): BelongsTo
     {
         return $this->belongsTo(AdAccount::class);
+    }
+
+    public function property(): BelongsTo
+    {
+        return $this->belongsTo(SearchConsoleProperty::class, 'property_id');
     }
 }

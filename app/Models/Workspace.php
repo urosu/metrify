@@ -33,6 +33,20 @@ class Workspace extends Model
         'billing_address',
         'vat_number',
         'is_orphaned',
+        'has_store',
+        'has_ads',
+        'has_gsc',
+        'has_psi',
+        'country',
+        'region',
+        'timezone',
+        'target_roas',
+        'target_cpo',
+        'target_marketing_pct',
+        'utm_coverage_pct',
+        'utm_coverage_status',
+        'utm_coverage_checked_at',
+        'utm_unrecognized_sources',
     ];
 
     protected function casts(): array
@@ -42,6 +56,16 @@ class Workspace extends Model
             'billing_address' => 'array',
             'is_orphaned' => 'boolean',
             'deleted_at' => 'datetime',
+            'has_store' => 'boolean',
+            'has_ads' => 'boolean',
+            'has_gsc' => 'boolean',
+            'has_psi' => 'boolean',
+            'target_roas' => 'decimal:2',
+            'target_cpo' => 'decimal:2',
+            'target_marketing_pct' => 'decimal:2',
+            'utm_coverage_pct' => 'decimal:2',
+            'utm_coverage_checked_at' => 'datetime',
+            'utm_unrecognized_sources' => 'array',
         ];
     }
 
@@ -115,5 +139,35 @@ class Workspace extends Model
     public function syncLogs(): HasMany
     {
         return $this->hasMany(SyncLog::class);
+    }
+
+    public function storeUrls(): HasMany
+    {
+        return $this->hasMany(StoreUrl::class);
+    }
+
+    public function metricBaselines(): HasMany
+    {
+        return $this->hasMany(MetricBaseline::class);
+    }
+
+    public function workspaceEvents(): HasMany
+    {
+        return $this->hasMany(WorkspaceEvent::class);
+    }
+
+    public function notificationPreferences(): HasMany
+    {
+        return $this->hasMany(NotificationPreference::class);
+    }
+
+    public function couponExclusions(): HasMany
+    {
+        return $this->hasMany(CouponExclusion::class);
+    }
+
+    public function dailySnapshotProducts(): HasMany
+    {
+        return $this->hasMany(DailySnapshotProduct::class);
     }
 }

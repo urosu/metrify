@@ -71,7 +71,7 @@ export default function AdminUsers({ users, filters }: Props) {
                     value={search}
                     onChange={(e) => handleSearch(e.target.value)}
                     placeholder="Search by name or email…"
-                    className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm placeholder-zinc-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 sm:max-w-xs"
+                    className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm placeholder-zinc-400 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary sm:max-w-xs"
                 />
             </div>
 
@@ -133,7 +133,7 @@ export default function AdminUsers({ users, filters }: Props) {
                                                 'rounded px-2 py-1 text-xs transition-colors',
                                                 u.is_super_admin
                                                     ? 'text-zinc-300 cursor-not-allowed'
-                                                    : 'text-indigo-600 hover:bg-indigo-50',
+                                                    : 'text-primary hover:bg-primary/10',
                                             )}
                                             disabled={u.is_super_admin}
                                             title={u.is_super_admin ? 'Cannot impersonate a super admin' : 'Impersonate this user'}

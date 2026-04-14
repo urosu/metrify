@@ -63,7 +63,7 @@ class AuthenticatedSessionController extends Controller
                     $action->handle($invitation, $authUser);
                     $request->session()->put('active_workspace_id', $invitation->workspace_id);
 
-                    return redirect()->route('dashboard')
+                    return $this->toDashboard($invitation->workspace_id)
                         ->with('success', 'You have joined the workspace.');
                 } catch (\RuntimeException $e) {
                     Log::warning('Invitation acceptance failed after login', [
@@ -75,7 +75,10 @@ class AuthenticatedSessionController extends Controller
             }
         }
 
-        return redirect()->intended(route('dashboard', absolute: false));
+        // Why: redirect to onboarding so it can decide whether to send the user
+        // to the dashboard (import completed) or to the appropriate onboarding step.
+        // Users who have completed onboarding are transparently forwarded to /dashboard.
+        return redirect()->intended(route('onboarding', absolute: false));
     }
 
     /**

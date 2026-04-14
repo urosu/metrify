@@ -9,6 +9,7 @@ use App\Exceptions\GoogleRateLimitException;
 use App\Exceptions\GoogleTokenExpiredException;
 use App\Models\SearchConsoleProperty;
 use Illuminate\Http\Client\Response;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -135,6 +136,56 @@ class SearchConsoleClient
         return $this->searchAnalytics($propertyUrl, $startDate, $endDate, ['date', 'page']);
     }
 
+    /**
+     * Fetch daily stats broken down by device + country (top 1,000 rows).
+     *
+     * Why: Phase 0 data capture — store device/country breakdown for Phase 2 anomaly detection.
+     * GSC returns device as 'MOBILE'/'DESKTOP'/'TABLET' (uppercase) and country as ISO 3166-1
+     * alpha-3 lowercase (e.g., 'deu', 'usa'). Normalisation happens in the job.
+     *
+     * @return list<array{date: string, device: string, country: string, clicks: int, impressions: int, ctr: float|null, position: float|null}>
+     *
+     * @throws GoogleTokenExpiredException
+     * @throws GoogleRateLimitException
+     * @throws GoogleApiException
+     */
+    public function queryDailyStatsBreakdown(string $propertyUrl, string $startDate, string $endDate): array
+    {
+        return $this->searchAnalytics($propertyUrl, $startDate, $endDate, ['date', 'device', 'country']);
+    }
+
+    /**
+     * Fetch per-query stats broken down by device + country (top 1,000 rows).
+     *
+     * Why: Phase 0 data capture — device/country breakdown for query-level analysis in Phase 2.
+     *
+     * @return list<array{date: string, query: string, device: string, country: string, clicks: int, impressions: int, ctr: float|null, position: float|null}>
+     *
+     * @throws GoogleTokenExpiredException
+     * @throws GoogleRateLimitException
+     * @throws GoogleApiException
+     */
+    public function querySearchQueriesBreakdown(string $propertyUrl, string $startDate, string $endDate): array
+    {
+        return $this->searchAnalytics($propertyUrl, $startDate, $endDate, ['date', 'query', 'device', 'country']);
+    }
+
+    /**
+     * Fetch per-page stats broken down by device + country (top 1,000 rows).
+     *
+     * Why: Phase 0 data capture — device/country breakdown for page-level analysis in Phase 2.
+     *
+     * @return list<array{date: string, page: string, device: string, country: string, clicks: int, impressions: int, ctr: float|null, position: float|null}>
+     *
+     * @throws GoogleTokenExpiredException
+     * @throws GoogleRateLimitException
+     * @throws GoogleApiException
+     */
+    public function queryPagesBreakdown(string $propertyUrl, string $startDate, string $endDate): array
+    {
+        return $this->searchAnalytics($propertyUrl, $startDate, $endDate, ['date', 'page', 'device', 'country']);
+    }
+
     // -------------------------------------------------------------------------
     // Token refresh
     // -------------------------------------------------------------------------
@@ -251,6 +302,13 @@ class SearchConsoleClient
 
         $this->assertSuccess($response);
 
+        // Record successful call for admin quota visibility.
+        $today = now()->toDateString();
+        Cache::put('gsc_last_success_at', now()->toISOString(), 86400);
+        $callKey = 'gsc_calls_' . $today;
+        Cache::add($callKey, 0, 172800);
+        Cache::increment($callKey);
+
         $rows = $response->json('rows', []);
 
         // Normalise each row: the 'keys' array maps positionally to $dimensions.
@@ -294,7 +352,16 @@ class SearchConsoleClient
 
         if ($status === 429 || $gStatus === 'RESOURCE_EXHAUSTED') {
             $retryAfter = (int) $response->header('Retry-After', 60);
-            throw new GoogleRateLimitException($retryAfter ?: 60);
+            $retryAfter = $retryAfter ?: 60;
+
+            // Record throttle event for admin visibility.
+            Cache::put('gsc_throttled_until', now()->addSeconds($retryAfter)->toISOString(), $retryAfter + 60);
+            Cache::put('gsc_last_throttle_at', now()->toISOString(), 86400);
+            $hitKey = 'gsc_rate_limit_hits_' . now()->toDateString();
+            Cache::add($hitKey, 0, 172800);
+            Cache::increment($hitKey);
+
+            throw new GoogleRateLimitException($retryAfter);
         }
 
         if ($status === 401 || $gStatus === 'UNAUTHENTICATED') {

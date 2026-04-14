@@ -23,12 +23,12 @@ class SystemSeeder extends Seeder
 
         // ── Sync logs ─────────────────────────────────────────────────────────
         $syncTypes = [
-            ['job_type' => 'SyncStoreOrdersJob',   'syncable_type' => 'App\Models\Store',     'syncable_id' => $store->id],
-            ['job_type' => 'SyncAdInsightsJob',     'syncable_type' => 'App\Models\AdAccount', 'syncable_id' => $fbAccount->id],
-            ['job_type' => 'SyncAdInsightsJob',     'syncable_type' => 'App\Models\AdAccount', 'syncable_id' => $gAccount->id],
-            ['job_type' => 'SyncProductsJob',       'syncable_type' => 'App\Models\Store',     'syncable_id' => $store->id],
-            ['job_type' => 'SyncSearchConsoleJob',  'syncable_type' => 'App\Models\SearchConsoleProperty', 'syncable_id' => 1],
-            ['job_type' => 'ComputeDailySnapshotJob','syncable_type' => 'App\Models\Store',    'syncable_id' => $store->id],
+            ['job_type' => 'SyncStoreOrdersJob',    'syncable_type' => 'App\Models\Store',                   'syncable_id' => $store->id,     'queue' => 'default'],
+            ['job_type' => 'SyncAdInsightsJob',      'syncable_type' => 'App\Models\AdAccount',              'syncable_id' => $fbAccount->id, 'queue' => 'default'],
+            ['job_type' => 'SyncAdInsightsJob',      'syncable_type' => 'App\Models\AdAccount',              'syncable_id' => $gAccount->id,  'queue' => 'default'],
+            ['job_type' => 'SyncProductsJob',        'syncable_type' => 'App\Models\Store',                   'syncable_id' => $store->id,     'queue' => 'default'],
+            ['job_type' => 'SyncSearchConsoleJob',   'syncable_type' => 'App\Models\SearchConsoleProperty',  'syncable_id' => 1,              'queue' => 'default'],
+            ['job_type' => 'ComputeDailySnapshotJob','syncable_type' => 'App\Models\Store',                   'syncable_id' => $store->id,     'queue' => 'low'],
         ];
 
         for ($i = 0; $i < 30; $i++) {
@@ -42,6 +42,8 @@ class SystemSeeder extends Seeder
                 'syncable_type'     => $type['syncable_type'],
                 'syncable_id'       => $type['syncable_id'],
                 'job_type'          => $type['job_type'],
+                'queue'             => $type['queue'],
+                'attempt'           => 1,
                 'status'            => $failed ? 'failed' : 'completed',
                 'records_processed' => $failed ? null : rand(10, 500),
                 'error_message'     => $failed ? 'Connection timeout after 30 seconds' : null,

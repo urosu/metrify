@@ -39,6 +39,10 @@ return [
         'client_id'     => env('FACEBOOK_APP_ID'),
         'client_secret' => env('FACEBOOK_APP_SECRET'),
         'redirect'      => env('FACEBOOK_REDIRECT_URI'),
+        // 'dev' = Marketing API development tier (max score 60, blocks for 300s when reached).
+        // 'standard' = after App Review grants Advanced Access to Ads Management Standard Access.
+        // Set FB_API_TIER=standard in .env once approved — unlocks ~190k+ calls/hour.
+        'api_tier'      => env('FB_API_TIER', 'dev'),
     ],
 
     'frankfurter' => [
@@ -50,6 +54,15 @@ return [
         'client_secret'       => env('GOOGLE_CLIENT_SECRET'),
         'redirect'            => env('GOOGLE_REDIRECT_URI'),
         'ads_developer_token' => env('GOOGLE_ADS_DEVELOPER_TOKEN'),
+    ],
+
+    // PageSpeed Insights API — used by RunLighthouseCheckJob.
+    // Key is a Google Cloud API key with PageSpeed Insights API enabled.
+    // Without a key, PSI allows ~25 req/day per IP (too low for production).
+    // See: PLANNING.md "Performance Monitoring — PSI Rate Limit Planning"
+    'psi' => [
+        'api_key' => env('PSI_API_KEY'),
+        'timeout' => (int) env('PSI_TIMEOUT_SECONDS', 30),
     ],
 
 ];

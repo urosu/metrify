@@ -55,8 +55,8 @@
     --card-foreground: oklch(0.145 0 0);
     --popover: oklch(1 0 0);
     --popover-foreground: oklch(0.145 0 0);
-    --primary: oklch(0.205 0 0);
-    --primary-foreground: oklch(0.985 0 0);
+    --primary: oklch(0.511 0.234 271.7);     /* indigo-600 */
+    --primary-foreground: oklch(0.985 0 0);  /* white */
     --secondary: oklch(0.97 0 0);
     --secondary-foreground: oklch(0.205 0 0);
     --muted: oklch(0.97 0 0);
@@ -67,11 +67,11 @@
     --border: oklch(0.922 0 0);
     --input: oklch(0.922 0 0);
     --ring: oklch(0.708 0 0);
-    --chart-1: oklch(0.87 0 0);
-    --chart-2: oklch(0.556 0 0);
-    --chart-3: oklch(0.439 0 0);
-    --chart-4: oklch(0.371 0 0);
-    --chart-5: oklch(0.269 0 0);
+    --chart-1: oklch(0.511 0.234 271.7);   /* indigo-600  — primary metric / revenue */
+    --chart-2: oklch(0.627 0.194 149.2);   /* emerald-500 — organic / GSC */
+    --chart-3: oklch(0.705 0.213 47.6);    /* amber-500   — spend / campaigns */
+    --chart-4: oklch(0.637 0.237 25.3);    /* rose-500    — refunds / alerts */
+    --chart-5: oklch(0.598 0.201 304.4);   /* violet-500  — secondary / compare */
     --radius: 0.625rem;
     --sidebar: oklch(0.985 0 0);
     --sidebar-foreground: oklch(0.145 0 0);
@@ -90,8 +90,8 @@
     --card-foreground: oklch(0.985 0 0);
     --popover: oklch(0.205 0 0);
     --popover-foreground: oklch(0.985 0 0);
-    --primary: oklch(0.922 0 0);
-    --primary-foreground: oklch(0.205 0 0);
+    --primary: oklch(0.623 0.214 271.7);     /* indigo-400 (lighter on dark bg) */
+    --primary-foreground: oklch(0.145 0 0);  /* near-black */
     --secondary: oklch(0.269 0 0);
     --secondary-foreground: oklch(0.985 0 0);
     --muted: oklch(0.269 0 0);
@@ -102,11 +102,11 @@
     --border: oklch(1 0 0 / 10%);
     --input: oklch(1 0 0 / 15%);
     --ring: oklch(0.556 0 0);
-    --chart-1: oklch(0.87 0 0);
-    --chart-2: oklch(0.556 0 0);
-    --chart-3: oklch(0.439 0 0);
-    --chart-4: oklch(0.371 0 0);
-    --chart-5: oklch(0.269 0 0);
+    --chart-1: oklch(0.623 0.214 271.7);   /* indigo-400 */
+    --chart-2: oklch(0.696 0.172 149.2);   /* emerald-400 */
+    --chart-3: oklch(0.769 0.188 47.6);    /* amber-400 */
+    --chart-4: oklch(0.712 0.197 25.3);    /* rose-400 */
+    --chart-5: oklch(0.671 0.179 304.4);   /* violet-400 */
     --sidebar: oklch(0.205 0 0);
     --sidebar-foreground: oklch(0.985 0 0);
     --sidebar-primary: oklch(0.488 0.243 264.376);
@@ -128,6 +128,18 @@
     @apply font-sans;
   }
 
+  /* Selection highlight */
+  ::selection {
+    background-color: oklch(from var(--primary) l c h / 0.15);
+    color: var(--foreground);
+  }
+
+  /* Scrollbar — webkit (Chrome/Safari/Edge) */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: var(--radius); }
+  ::-webkit-scrollbar-thumb:hover { background: var(--muted-foreground); }
+
   /* Buttons */
   button,
   [role='button'],
@@ -141,15 +153,41 @@
     @apply cursor-not-allowed;
   }
 
-  /* Inputs, selects, textareas */
+  /* Inputs, selects, textareas — use tokens instead of hardcoded zinc values */
   input:not([type='checkbox']):not([type='radio']):not([type='range']),
   textarea,
   select {
-    @apply px-3 py-2 text-sm text-zinc-900 placeholder:text-zinc-400;
+    @apply px-3 py-2 text-sm;
+    color: var(--foreground);
   }
+  input::placeholder, textarea::placeholder {
+    color: var(--muted-foreground);
+  }
+  /* Focus: uses --primary from token system instead of hardcoded indigo */
   input:focus,
   textarea:focus,
   select:focus {
-    @apply outline-none ring-2 ring-indigo-500/40 border-indigo-500;
+    @apply outline-none ring-2;
+    ring-color: oklch(from var(--primary) l c h / 0.4);
+    border-color: var(--primary);
+  }
+}
+
+@layer components {
+  /* Settings page section card — title bar + content */
+  .settings-section {
+    @apply rounded-xl border border-zinc-200 bg-white overflow-hidden;
+  }
+  .settings-section-header {
+    @apply border-b border-zinc-100 px-6 py-4;
+  }
+  .settings-section-body {
+    @apply px-6 py-5 space-y-4;
+  }
+
+  /* Page content area — max-width constrained, consistent padding */
+  /* Already in AppLayout main — this utility lets sub-layouts reuse it */
+  .page-content {
+    @apply mx-auto max-w-[1400px] px-6 py-6;
   }
 }

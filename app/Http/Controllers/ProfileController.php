@@ -55,6 +55,30 @@ class ProfileController extends Controller
     }
 
     /**
+     * Merge arbitrary key/value pairs into the user's view_preferences JSONB.
+     *
+     * Why: BreakdownView and other UI components persist per-view state (breakdown mode,
+     * sort order, filter chip) across sessions. Each call merges — never replaces —
+     * so callers can update one key without knowing the full object.
+     *
+     * Related: resources/js/Components/shared/BreakdownView.tsx (reads + writes these prefs)
+     * See: PLANNING.md "view_preferences JSONB" — users.view_preferences
+     */
+    public function updateViewPreferences(Request $request): \Illuminate\Http\JsonResponse
+    {
+        $data = $request->validate([
+            'preferences' => ['required', 'array'],
+            'preferences.*' => ['present'],
+        ]);
+
+        $user = $request->user();
+        $prefs = $user->view_preferences ?? [];
+        $user->update(['view_preferences' => array_merge($prefs, $data['preferences'])]);
+
+        return response()->json(['ok' => true]);
+    }
+
+    /**
      * Delete the user's account.
      */
     public function destroy(Request $request): RedirectResponse

@@ -19,29 +19,33 @@ class BillingController extends Controller
 {
     public function show(): Response
     {
-        $workspace = Workspace::findOrFail(app(WorkspaceContext::class)->id());
+        $workspace = Workspace::withoutGlobalScopes()
+            ->select([
+                'id', 'name', 'billing_plan', 'trial_ends_at', 'stripe_id',
+                'pm_type', 'pm_last_four', 'billing_name', 'billing_email',
+                'billing_address', 'vat_number', 'has_store', 'reporting_currency',
+            ])
+            ->findOrFail(app(WorkspaceContext::class)->id());
 
         $this->authorize('viewBilling', $workspace);
 
         $now = now();
 
-        // Last full calendar month revenue (source of truth for tier assignment)
-        $lastMonth      = $now->copy()->subMonth();
-        $startOfLast    = $lastMonth->copy()->startOfMonth()->toDateString();
-        $endOfLast      = $lastMonth->copy()->endOfMonth()->toDateString();
+        // Last full calendar month billable amount (source of truth for tier assignment).
+        // Billing basis: has_store=true → GMV; has_store=false → ad spend.
+        // See: PLANNING.md "Billing basis auto-derivation"
+        $lastMonth   = $now->copy()->subMonth();
+        $startOfLast = $lastMonth->copy()->startOfMonth()->toDateString();
+        $endOfLast   = $lastMonth->copy()->endOfMonth()->toDateString();
 
-        $lastMonthRevenue = (float) DailySnapshot::withoutGlobalScopes()
-            ->where('workspace_id', $workspace->id)
-            ->whereBetween('date', [$startOfLast, $endOfLast])
-            ->select(DB::raw('COALESCE(SUM(revenue), 0) AS total'))
-            ->value('total');
+        $lastMonthRevenue = $this->computeBillableAmount($workspace, $startOfLast, $endOfLast);
 
-        // Current month revenue so far (for the "next billing" preview)
-        $currentMonthRevenue = (float) DailySnapshot::withoutGlobalScopes()
-            ->where('workspace_id', $workspace->id)
-            ->whereBetween('date', [$now->copy()->startOfMonth()->toDateString(), $now->toDateString()])
-            ->select(DB::raw('COALESCE(SUM(revenue), 0) AS total'))
-            ->value('total');
+        // Current month billable so far (for the "next billing" preview)
+        $currentMonthRevenue = $this->computeBillableAmount(
+            $workspace,
+            $now->copy()->startOfMonth()->toDateString(),
+            $now->toDateString(),
+        );
 
         // Resolve the tier that would be assigned based on last month's revenue
         $revenueForTier = $lastMonthRevenue > 0.0 ? $lastMonthRevenue : $currentMonthRevenue;
@@ -123,7 +127,7 @@ class BillingController extends Controller
         $daysUntilBilling    = (int) $now->diffInDays($now->copy()->startOfMonth()->addMonth(), false);
         $upcomingInvoiceData = $upcomingInvoiceData ?? null;
 
-        // Extrapolate current month revenue to a full-month estimate.
+        // Extrapolate current month billable to a full-month estimate.
         // Only meaningful from day 7 onwards — before that there's too little data.
         $dayOfMonth              = (int) $now->format('j');
         $daysInMonth             = (int) $now->format('t');
@@ -134,8 +138,12 @@ class BillingController extends Controller
             $projectedMonthTier    = $this->resolveTierFromRevenue($projectedMonthRevenue);
         }
 
+        // 'gmv' for ecom workspaces, 'ad_spend' for non-ecom.
+        // Used in the frontend to label revenue cards appropriately.
+        $billingBasis = $workspace->has_store ? 'gmv' : 'ad_spend';
+
         return Inertia::render('Settings/Billing', [
-            'workspace' => [
+            'workspaceInfo' => [
                 'id'              => $workspace->id,
                 'name'            => $workspace->name,
                 'billing_plan'    => $workspace->billing_plan,
@@ -148,21 +156,22 @@ class BillingController extends Controller
                 'billing_address' => $workspace->billing_address,
                 'vat_number'      => $workspace->vat_number,
             ],
-            'subscription'           => $subscriptionData,
-            'upcoming_invoice'       => $upcomingInvoiceData,
-            'payment_methods'        => $paymentMethodsData,
-            'invoices'               => $invoicesData,
-            'last_month_revenue'     => $lastMonthRevenue,
-            'current_month_revenue'  => $currentMonthRevenue,
-            'resolved_tier'          => $resolvedTier,
+            'subscription'            => $subscriptionData,
+            'upcoming_invoice'        => $upcomingInvoiceData,
+            'payment_methods'         => $paymentMethodsData,
+            'invoices'                => $invoicesData,
+            'last_month_revenue'      => $lastMonthRevenue,
+            'current_month_revenue'   => $currentMonthRevenue,
+            'resolved_tier'           => $resolvedTier,
             'current_month_tier'      => $currentMonthTier,
             'projected_month_revenue' => $projectedMonthRevenue,
             'projected_month_tier'    => $projectedMonthTier,
             'days_until_billing'      => $daysUntilBilling,
             'day_of_month'            => $dayOfMonth,
             'days_in_month'           => $daysInMonth,
-            'tier_prices'            => $this->tierPrices(),
-            'status'                 => session('status'),
+            'tier_prices'             => $this->tierPrices(),
+            'billing_basis'           => $billingBasis,
+            'status'                  => session('status'),
         ]);
     }
 
@@ -174,7 +183,9 @@ class BillingController extends Controller
      */
     public function subscribe(Request $request): RedirectResponse
     {
-        $workspace = Workspace::findOrFail(app(WorkspaceContext::class)->id());
+        $workspace = Workspace::withoutGlobalScopes()
+            ->select(['id', 'name', 'billing_plan', 'stripe_id', 'billing_name', 'billing_email', 'has_store'])
+            ->findOrFail(app(WorkspaceContext::class)->id());
 
         $this->authorize('manageBilling', $workspace);
 
@@ -184,25 +195,21 @@ class BillingController extends Controller
 
         $interval = $validated['interval'] ?? 'monthly';
 
-        // Determine tier from last full calendar month revenue.
+        // Determine tier from last full calendar month billable amount (GMV or ad spend).
         $now         = now();
         $lastMonth   = $now->copy()->subMonth();
         $startOfLast = $lastMonth->copy()->startOfMonth()->toDateString();
         $endOfLast   = $lastMonth->copy()->endOfMonth()->toDateString();
 
-        $revenue = (float) DailySnapshot::withoutGlobalScopes()
-            ->where('workspace_id', $workspace->id)
-            ->whereBetween('date', [$startOfLast, $endOfLast])
-            ->select(DB::raw('COALESCE(SUM(revenue), 0) AS total'))
-            ->value('total');
+        $revenue = $this->computeBillableAmount($workspace, $startOfLast, $endOfLast);
 
         // Fall back to current month if no last month data yet.
         if ($revenue === 0.0) {
-            $revenue = (float) DailySnapshot::withoutGlobalScopes()
-                ->where('workspace_id', $workspace->id)
-                ->whereBetween('date', [$now->copy()->startOfMonth()->toDateString(), $now->toDateString()])
-                ->select(DB::raw('COALESCE(SUM(revenue), 0) AS total'))
-                ->value('total');
+            $revenue = $this->computeBillableAmount(
+                $workspace,
+                $now->copy()->startOfMonth()->toDateString(),
+                $now->toDateString(),
+            );
         }
 
         $tier     = $this->resolveTierFromRevenue($revenue);
@@ -424,8 +431,38 @@ class BillingController extends Controller
     // ──────────────────────────────────────────────────────────────────────────
 
     /**
-     * Resolve billing tier name from a revenue amount (in reporting currency, EUR-equivalent).
-     * Returns the flat tier key or 'percentage'.
+     * Compute the billable amount for a workspace over the given date range.
+     *
+     * Billing basis (see PLANNING.md "Billing basis auto-derivation"):
+     *   has_store = true  → GMV from daily_snapshots.revenue
+     *   has_store = false → ad spend from ad_insights at campaign level
+     *
+     * Why campaign level for ad spend: PLANNING.md says "never SUM across
+     * levels". Campaign level gives correct workspace total without double-count.
+     */
+    private function computeBillableAmount(Workspace $workspace, string $from, string $to): float
+    {
+        if ($workspace->has_store) {
+            return (float) DailySnapshot::withoutGlobalScopes()
+                ->where('workspace_id', $workspace->id)
+                ->whereBetween('date', [$from, $to])
+                ->select(DB::raw('COALESCE(SUM(revenue), 0) AS total'))
+                ->value('total');
+        }
+
+        // Non-ecom: total ad spend (campaign-level to avoid double-counting).
+        return (float) DB::table('ad_insights')
+            ->join('ad_accounts', 'ad_insights.ad_account_id', '=', 'ad_accounts.id')
+            ->where('ad_accounts.workspace_id', $workspace->id)
+            ->where('ad_insights.level', 'campaign')
+            ->whereBetween('ad_insights.date', [$from, $to])
+            ->select(DB::raw('COALESCE(SUM(ad_insights.spend_in_reporting_currency), 0) AS total'))
+            ->value('total');
+    }
+
+    /**
+     * Resolve billing tier name from a billable amount.
+     * Returns the flat tier key ('starter'/'growth') or 'scale' for the metered tier.
      */
     private function resolveTierFromRevenue(float $revenue): string
     {
@@ -441,17 +478,19 @@ class BillingController extends Controller
             }
         }
 
-        return 'percentage';
+        // Scale is the metered tier. DB plan key = 'scale'.
+        return 'scale';
     }
 
     /**
      * Return the Stripe Price ID for the given tier and billing interval.
+     * Scale (metered) has no annual option.
      * Returns null if the price ID is not configured.
      */
     private function priceIdForTier(string $tier, string $interval): ?string
     {
-        if ($tier === 'percentage') {
-            return config('billing.percentage_plan.price_id') ?: null;
+        if ($tier === 'scale') {
+            return config('billing.scale_plan.price_id') ?: null;
         }
 
         $flatPlans = config('billing.flat_plans', []);
@@ -467,16 +506,16 @@ class BillingController extends Controller
 
     /**
      * Return monthly/annual prices per tier for the billing UI.
+     * Scale is metered: monthly/annual are null (computed dynamically from usage).
      *
-     * @return array<string, array{monthly: int|null, annual: int|null}>
+     * @return array<string, array{monthly: int|null, annual: int|null, rate_gmv: float|null, rate_ad_spend: float|null}>
      */
     private function tierPrices(): array
     {
         return [
-            'starter'    => ['monthly' => 29,  'annual' => 290],
-            'growth'     => ['monthly' => 59,  'annual' => 590],
-            'scale'      => ['monthly' => 119, 'annual' => 1190],
-            'percentage' => ['monthly' => null, 'annual' => null],
+            'starter' => ['monthly' => 29,  'annual' => 290,  'rate_gmv' => null, 'rate_ad_spend' => null],
+            'growth'  => ['monthly' => 59,  'annual' => 590,  'rate_gmv' => null, 'rate_ad_spend' => null],
+            'scale'   => ['monthly' => null, 'annual' => null, 'rate_gmv' => 0.01, 'rate_ad_spend' => 0.02],
         ];
     }
 }

@@ -62,6 +62,14 @@ class OrderSeeder extends Seeder
         'Search — Brand UK',
     ];
 
+    private const PAYMENT_METHODS = [
+        'bacs'   => 'Bank Transfer',
+        'cheque' => 'Check Payment',
+        'cod'    => 'Cash on Delivery',
+        'stripe' => 'Credit Card (Stripe)',
+        'paypal' => 'PayPal',
+    ];
+
     private const EMAILS = [
         'alice@example.com', 'bob@example.com', 'charlie@example.com',
         'diana@example.com', 'edward@example.com', 'fiona@example.com',
@@ -102,10 +110,16 @@ class OrderSeeder extends Seeder
                 }
 
                 for ($o = 0; $o < $ordersToday; $o++) {
-                    $occurred = $baseDate->copy()->addHours(rand(8, 22))->addMinutes(rand(0, 59));
-                    $status   = $this->weighted(self::STATUSES);
-                    $country  = $this->weighted(self::COUNTRIES);
-                    $email    = self::EMAILS[array_rand(self::EMAILS)];
+                    $occurred      = $baseDate->copy()->addHours(rand(8, 22))->addMinutes(rand(0, 59));
+                    $status        = $this->weighted(self::STATUSES);
+                    $country       = $this->weighted(self::COUNTRIES);
+                    $email         = self::EMAILS[array_rand(self::EMAILS)];
+                    $paymentKey    = array_rand(self::PAYMENT_METHODS);
+                    $paymentTitle  = self::PAYMENT_METHODS[$paymentKey];
+                    // customer_id: numeric string, per-store. ~30% of orders are repeat customers.
+                    $customerId    = mt_rand(0, 100) < 30
+                        ? (string) mt_rand(1001, 1050)  // repeat pool
+                        : (string) ($externalId + mt_rand(2000, 9999));
 
                     $items    = $this->pickItems(rand(1, 2));
                     $subtotal = array_sum(array_column($items, 'line_total'));
@@ -138,9 +152,14 @@ class OrderSeeder extends Seeder
                         'tax'                         => $tax,
                         'shipping'                    => $shipping,
                         'discount'                    => $discount,
+                        'refund_amount'               => $status === 'refunded' ? $total : 0.00,
                         'total_in_reporting_currency' => $totalEur,
                         'customer_email_hash'         => hash('sha256', strtolower(trim($email))),
+                        'customer_id'                 => $customerId,
                         'customer_country'            => $country,
+                        'shipping_country'            => $country,
+                        'payment_method'              => $paymentKey,
+                        'payment_method_title'        => $paymentTitle,
                         'utm_source'                  => $utmSource,
                         'utm_medium'                  => $this->randomUtmMedium(),
                         'utm_campaign'                => $utmCampaign,
@@ -151,8 +170,6 @@ class OrderSeeder extends Seeder
                     foreach ($items as $item) {
                         OrderItem::create([
                             'order_id'            => $order->id,
-                            'workspace_id'        => $workspace->id,
-                            'store_id'            => $store->id,
                             'product_external_id' => $item['product_id'],
                             'product_name'        => $item['name'],
                             'variant_name'        => null,

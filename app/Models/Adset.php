@@ -10,6 +10,8 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
+// Related: app/Jobs/Concerns/SyncsAdInsights.php (writes adsets via syncStructure)
+// Related: app/Jobs/SyncAdInsightsJob.php (queries adset-level AdInsight rows)
 #[ScopedBy([WorkspaceScope::class])]
 class Adset extends Model
 {
@@ -34,5 +36,10 @@ class Adset extends Model
     public function ads(): HasMany
     {
         return $this->hasMany(Ad::class);
+    }
+
+    public function adInsights(): HasMany
+    {
+        return $this->hasMany(AdInsight::class);
     }
 }

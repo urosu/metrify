@@ -4,13 +4,16 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers;
 
+use App\Exceptions\GoogleAccountDisabledException;
 use App\Exceptions\GoogleApiException;
 use App\Exceptions\GoogleTokenExpiredException;
+use App\Jobs\ComputeUtmCoverageJob;
 use App\Jobs\SyncAdInsightsJob;
 use App\Jobs\SyncSearchConsoleJob;
 use App\Models\AdAccount;
 use App\Models\SearchConsoleProperty;
 use App\Models\Store;
+use App\Models\SyncLog;
 use App\Models\WorkspaceUser;
 use App\Services\Integrations\Google\GoogleAdsClient;
 use App\Services\Integrations\SearchConsole\SearchConsoleClient;
@@ -18,6 +21,7 @@ use App\Services\WorkspaceContext;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
@@ -63,11 +67,15 @@ class GoogleOAuthController extends Controller
 
         $this->authorizeWorkspaceAccess($request, $workspaceId);
 
+        // Why: when initiated from onboarding tiles, return_to routes the callback back to onboarding.
+        $returnTo = $request->query('from') === 'onboarding' ? 'onboarding' : 'integrations';
+
         $state = $this->encodeState([
             'workspace_id' => $workspaceId,
             'type'         => 'google_ads',
             'nonce'        => Str::random(16),
             'expires_at'   => now()->addMinutes(15)->timestamp,
+            'return_to'    => $returnTo,
         ]);
 
         return redirect($this->buildAuthUrl(self::SCOPE_ADS, $state));
@@ -87,11 +95,15 @@ class GoogleOAuthController extends Controller
 
         $this->authorizeWorkspaceAccess($request, $workspaceId);
 
+        // Why: when initiated from onboarding tiles, return_to routes the callback back to onboarding.
+        $returnTo = $request->query('from') === 'onboarding' ? 'onboarding' : 'integrations';
+
         $state = $this->encodeState([
             'workspace_id' => $workspaceId,
             'type'         => 'gsc',
             'nonce'        => Str::random(16),
             'expires_at'   => now()->addMinutes(15)->timestamp,
+            'return_to'    => $returnTo,
         ]);
 
         return redirect($this->buildAuthUrl(self::SCOPE_GSC, $state));
@@ -113,15 +125,15 @@ class GoogleOAuthController extends Controller
             Log::warning('Google OAuth: invalid or expired state', [
                 'state_type' => $state['type'] ?? null,
             ]);
-            return redirect()->away(rtrim(config('app.url'), '/') . '/settings/integrations')
-                ->with('error', 'Google connection failed: invalid or expired link. Please try again.');
+            return redirect()->away(rtrim(config('app.url'), '/') . '/settings/integrations?oauth_error=' . urlencode('Google connection failed: invalid or expired link. Please try again.'));
         }
 
         $workspaceId = (int) $state['workspace_id'];
+        $platform    = $state['type'] === 'gsc' ? 'gsc' : 'google_ads';
+        $returnTo    = $state['return_to'] ?? 'integrations';
 
         if ($request->query('error')) {
-            return redirect()->away(rtrim(config('app.url'), '/') . '/settings/integrations')
-                ->with('error', 'Google connection was cancelled.');
+            return redirect()->away(rtrim(config('app.url'), '/') . $this->oauthDest($returnTo) . '?oauth_error=' . urlencode('Google connection was cancelled.') . '&oauth_platform=' . $platform);
         }
 
         $code = (string) $request->query('code', '');
@@ -134,13 +146,12 @@ class GoogleOAuthController extends Controller
                 'type'         => $state['type'],
                 'error'        => $e->getMessage(),
             ]);
-            return redirect()->away(rtrim(config('app.url'), '/') . '/settings/integrations')
-                ->with('error', 'Google connection failed: ' . $e->getMessage());
+            return redirect()->away(rtrim(config('app.url'), '/') . $this->oauthDest($returnTo) . '?oauth_error=' . urlencode('Google connection failed: ' . $e->getMessage()) . '&oauth_platform=' . $platform);
         }
 
         return match ($state['type']) {
-            'google_ads' => $this->handleGoogleAdsCallback($request, $workspaceId, $tokens),
-            'gsc'        => $this->handleGscCallback($workspaceId, $tokens),
+            'google_ads' => $this->handleGoogleAdsCallback($request, $workspaceId, $tokens, $returnTo),
+            'gsc'        => $this->handleGscCallback($workspaceId, $tokens, $returnTo),
         };
     }
 
@@ -178,6 +189,8 @@ class GoogleOAuthController extends Controller
                 ->with('error', 'Link expired. Please re-connect Google Search Console.');
         }
 
+        $returnTo = $sessionData['return_to'] ?? 'integrations';
+
         cache()->forget($pendingKey);
 
         $propertyUrl  = $validated['property_url'];
@@ -212,8 +225,23 @@ class GoogleOAuthController extends Controller
                 'historical_import_progress'   => null,
             ]);
 
-            \App\Jobs\GscHistoricalImportJob::dispatch($property->id, $workspaceId);
+            $gscSyncLog = SyncLog::create([
+                'workspace_id'  => $workspaceId,
+                'syncable_type' => SearchConsoleProperty::class,
+                'syncable_id'   => $property->id,
+                'job_type'      => \App\Jobs\GscHistoricalImportJob::class,
+                'status'        => 'queued',
+                'queue'         => 'low',
+                'scheduled_at'  => now(),
+            ]);
+
+            \App\Jobs\GscHistoricalImportJob::dispatch($property->id, $workspaceId, $gscSyncLog->id);
         }
+
+        // Why: has_gsc drives nav visibility. See: PLANNING.md "Workspace integration flags"
+        DB::table('workspaces')
+            ->where('id', $workspaceId)
+            ->update(['has_gsc' => true]);
 
         SyncSearchConsoleJob::dispatch($property->id, $workspaceId);
 
@@ -223,7 +251,7 @@ class GoogleOAuthController extends Controller
             'property_id'  => $property->id,
         ]);
 
-        return redirect('/settings/integrations')
+        return redirect($this->oauthDest($returnTo))
             ->with('success', 'Google Search Console property connected successfully.');
     }
 
@@ -253,6 +281,8 @@ class GoogleOAuthController extends Controller
             return redirect('/settings/integrations')
                 ->with('error', 'Link expired. Please re-connect Google Ads.');
         }
+
+        $returnTo = $pending['return_to'] ?? 'integrations';
 
         cache()->forget($validated['gads_pending_key']);
 
@@ -289,11 +319,32 @@ class GoogleOAuthController extends Controller
                     'historical_import_progress'   => null,
                 ]);
 
-                \App\Jobs\AdHistoricalImportJob::dispatch($adAccount->id, $workspaceId);
+                $adSyncLog = SyncLog::create([
+                    'workspace_id'  => $workspaceId,
+                    'syncable_type' => AdAccount::class,
+                    'syncable_id'   => $adAccount->id,
+                    'job_type'      => \App\Jobs\AdHistoricalImportJob::class,
+                    'status'        => 'queued',
+                    'queue'         => 'low',
+                    'scheduled_at'  => now(),
+                ]);
+
+                \App\Jobs\AdHistoricalImportJob::dispatch($adAccount->id, $workspaceId, $adSyncLog->id);
             }
 
             \App\Jobs\SyncAdInsightsJob::dispatch($adAccount->id, $workspaceId);
             $connected++;
+        }
+
+        if ($connected > 0) {
+            // Why: has_ads drives billing basis for non-ecom workspaces + nav visibility.
+            // See: PLANNING.md "Billing basis auto-derivation"
+            DB::table('workspaces')
+                ->where('id', $workspaceId)
+                ->update(['has_ads' => true]);
+
+            // Recompute UTM coverage now that ads are connected.
+            ComputeUtmCoverageJob::dispatch($workspaceId)->onQueue('low');
         }
 
         Log::info('Google Ads OAuth: connected ad accounts', [
@@ -301,7 +352,7 @@ class GoogleOAuthController extends Controller
             'count'        => $connected,
         ]);
 
-        return redirect('/settings/integrations')
+        return redirect($this->oauthDest($returnTo))
             ->with('success', "{$connected} Google Ads account(s) connected successfully.");
     }
 
@@ -320,23 +371,31 @@ class GoogleOAuthController extends Controller
         Request $request,
         int $workspaceId,
         array $tokens,
+        string $returnTo = 'integrations',
     ): RedirectResponse {
         $client = GoogleAdsClient::withToken($tokens['access_token']);
 
         try {
             $customerIds = $client->listAccessibleCustomers();
+        } catch (GoogleAccountDisabledException $e) {
+            Log::warning('Google Ads OAuth: account not enabled or developer token in test mode', [
+                'workspace_id' => $workspaceId,
+                'error'        => $e->getMessage(),
+            ]);
+            return redirect($this->oauthDest($returnTo))
+                ->with('error', 'Google Ads account cannot be accessed. The account may be inactive, or the app is still in test mode and cannot connect to live accounts.');
         } catch (GoogleApiException | GoogleTokenExpiredException $e) {
             Log::error('Google Ads OAuth: failed to list accessible customers', [
                 'workspace_id' => $workspaceId,
                 'error'        => $e->getMessage(),
             ]);
-            return redirect('/settings/integrations')
+            return redirect($this->oauthDest($returnTo))
                 ->with('error', 'Could not retrieve Google Ads accounts: ' . $e->getMessage());
         }
 
         if (empty($customerIds)) {
-            return redirect()->away(rtrim(config('app.url'), '/') . '/settings/integrations')
-                ->with('error', 'No Google Ads accounts were found for this user.');
+            $msg = urlencode('No Google Ads accounts were found for this user.');
+            return redirect()->away(rtrim(config('app.url'), '/') . $this->oauthDest($returnTo) . '?oauth_error=' . $msg . '&oauth_platform=google_ads');
         }
 
         // Fetch account name, currency, and manager flag for each customer.
@@ -347,6 +406,12 @@ class GoogleOAuthController extends Controller
         foreach ($customerIds as $customerId) {
             try {
                 $info = $client->getCustomerInfo($customerId);
+            } catch (GoogleAccountDisabledException $e) {
+                Log::warning('Google Ads OAuth: skipping disabled/inaccessible customer', [
+                    'customer_id' => $customerId,
+                    'error'       => $e->getMessage(),
+                ]);
+                continue;
             } catch (GoogleApiException $e) {
                 $info = ['name' => $customerId, 'currency' => 'USD', 'is_manager' => false];
                 Log::warning('Google Ads OAuth: could not fetch customer info', [
@@ -370,6 +435,11 @@ class GoogleOAuthController extends Controller
             ];
         }
 
+        if (empty($accounts)) {
+            $msg = urlencode('No connectable Google Ads accounts were found. Manager accounts (MCCs) and disabled accounts are not supported.');
+            return redirect()->away(rtrim(config('app.url'), '/') . $this->oauthDest($returnTo) . '?oauth_error=' . $msg . '&oauth_platform=google_ads');
+        }
+
         $pendingKey = 'gads_pending_' . Str::uuid();
 
         cache()->put($pendingKey, [
@@ -378,9 +448,10 @@ class GoogleOAuthController extends Controller
             'refresh_token' => $tokens['refresh_token'],
             'expires_at'    => $tokens['expires_at']->timestamp,
             'accounts'      => $accounts,
+            'return_to'     => $returnTo,
         ], now()->addMinutes(15));
 
-        $redirectUrl = rtrim(config('app.url'), '/') . '/settings/integrations?gads_pending=' . urlencode($pendingKey);
+        $redirectUrl = rtrim(config('app.url'), '/') . $this->oauthDest($returnTo) . '?gads_pending=' . urlencode($pendingKey);
 
         return redirect()->away($redirectUrl);
     }
@@ -393,8 +464,11 @@ class GoogleOAuthController extends Controller
      *
      * @param  array{access_token: string, refresh_token: string, expires_at: \Carbon\Carbon} $tokens
      */
-    private function handleGscCallback(int $workspaceId, array $tokens): RedirectResponse
-    {
+    private function handleGscCallback(
+        int $workspaceId,
+        array $tokens,
+        string $returnTo = 'integrations',
+    ): RedirectResponse {
         $client = SearchConsoleClient::withToken($tokens['access_token']);
 
         try {
@@ -404,13 +478,12 @@ class GoogleOAuthController extends Controller
                 'workspace_id' => $workspaceId,
                 'error'        => $e->getMessage(),
             ]);
-            return redirect('/settings/integrations')
+            return redirect($this->oauthDest($returnTo))
                 ->with('error', 'Could not retrieve Search Console properties: ' . $e->getMessage());
         }
 
         if (empty($properties)) {
-            return redirect()->away(rtrim(config('app.url'), '/') . '/settings/integrations')
-                ->with('error', 'No Search Console properties were found for this account.');
+            return redirect()->away(rtrim(config('app.url'), '/') . $this->oauthDest($returnTo) . '?oauth_error=' . urlencode('No Search Console properties were found for this account.') . '&oauth_platform=gsc');
         }
 
         // Store tokens in cache — session can't be used here since the callback
@@ -423,9 +496,10 @@ class GoogleOAuthController extends Controller
             'refresh_token' => $tokens['refresh_token'],
             'expires_at'    => $tokens['expires_at'],
             'properties'    => array_map(static fn (array $p): string => $p['siteUrl'], $properties),
+            'return_to'     => $returnTo,
         ], now()->addMinutes(15));
 
-        $redirectUrl = rtrim(config('app.url'), '/') . '/settings/integrations?gsc_pending=' . urlencode($pendingKey);
+        $redirectUrl = rtrim(config('app.url'), '/') . $this->oauthDest($returnTo) . '?gsc_pending=' . urlencode($pendingKey);
 
         return redirect()->away($redirectUrl);
     }
@@ -598,5 +672,14 @@ class GoogleOAuthController extends Controller
             ->exists();
 
         abort_unless($allowed, 403, 'You do not have permission to connect integrations for this workspace.');
+    }
+
+    /**
+     * Return the path to redirect to after OAuth, depending on where the flow was initiated.
+     * When initiated from onboarding tiles, return '/onboarding'; otherwise '/settings/integrations'.
+     */
+    private function oauthDest(string $returnTo): string
+    {
+        return $returnTo === 'onboarding' ? '/onboarding' : '/settings/integrations';
     }
 }

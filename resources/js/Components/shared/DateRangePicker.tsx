@@ -2,10 +2,10 @@ import React, { useState, useCallback } from 'react';
 import { format, subDays, startOfMonth, endOfMonth, startOfYear, subMonths, subYears, startOfDay } from 'date-fns';
 import type { DateRange as DayPickerRange } from 'react-day-picker';
 import { usePage } from '@inertiajs/react';
-import { Calendar } from '@/components/ui/calendar';
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-import { Button } from '@/components/ui/button';
-import { Separator } from '@/components/ui/separator';
+import { Calendar } from '@/Components/ui/calendar';
+import { Popover, PopoverContent, PopoverTrigger } from '@/Components/ui/popover';
+import { Button } from '@/Components/ui/button';
+import { Separator } from '@/Components/ui/separator';
 import { CalendarIcon, ChevronDown } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useDateRange, type DateRange, type Granularity } from '@/Hooks/useDateRange';
@@ -106,6 +106,8 @@ export function DateRangePicker({ className }: DateRangePickerProps) {
     const [tempTo, setTempTo] = useState<Date | undefined>(
         range.to ? parseIso(range.to) : undefined,
     );
+    const [activePreset, setActivePreset] = useState<string | null>(null);
+    const isAllTime = activePreset === 'All time';
     const [comparisonOption, setComparisonOption] = useState<ComparisonOption>(
         range.compare_from ? 'previous_period' : 'none',
     );
@@ -121,11 +123,16 @@ export function DateRangePicker({ className }: DateRangePickerProps) {
         const { from, to } = preset.range();
         setTempFrom(from);
         setTempTo(to);
+        setActivePreset(preset.label);
+        if (preset.label === 'All time') {
+            setComparisonOption('none');
+        }
     }, []);
 
     const handleCalendarSelect = useCallback((selected: DayPickerRange | undefined) => {
         setTempFrom(selected?.from);
         setTempTo(selected?.to);
+        setActivePreset(null);
     }, []);
 
     const handleApply = useCallback(() => {
@@ -172,7 +179,7 @@ export function DateRangePicker({ className }: DateRangePickerProps) {
                 <CalendarIcon className="h-3.5 w-3.5 text-zinc-400 shrink-0" />
                 <span className="font-medium">{displayLabel}</span>
                 {hasComparison && (
-                    <span className="rounded bg-indigo-50 px-1.5 py-0.5 text-xs font-medium text-indigo-600">
+                    <span className="rounded bg-primary/10 px-1.5 py-0.5 text-xs font-medium text-primary">
                         vs {formatDisplayRange(range.compare_from!, range.compare_to!)}
                     </span>
                 )}
@@ -203,7 +210,7 @@ export function DateRangePicker({ className }: DateRangePickerProps) {
                                     className={cn(
                                         'w-full rounded-md px-2 py-1.5 text-left text-sm transition-colors',
                                         active
-                                            ? 'bg-indigo-50 text-indigo-700 font-medium'
+                                            ? 'bg-primary/10 text-primary font-medium'
                                             : 'text-zinc-600 hover:bg-zinc-50',
                                     )}
                                 >
@@ -237,8 +244,8 @@ export function DateRangePicker({ className }: DateRangePickerProps) {
 
                         <Separator />
 
-                        {/* Comparison */}
-                        <div className="px-4 py-3 space-y-2">
+                        {/* Comparison — hidden for All time since there is no meaningful prior period */}
+                        {!isAllTime && <div className="px-4 py-3 space-y-2">
                             <div className="text-xs font-medium text-zinc-500 uppercase tracking-wide">
                                 Compare to
                             </div>
@@ -257,7 +264,7 @@ export function DateRangePicker({ className }: DateRangePickerProps) {
                                         className={cn(
                                             'rounded-full px-3 py-1 text-xs font-medium border transition-colors',
                                             comparisonOption === value
-                                                ? 'border-indigo-600 bg-indigo-50 text-indigo-700'
+                                                ? 'border-primary bg-primary/10 text-primary'
                                                 : 'border-zinc-200 text-zinc-600 hover:border-zinc-300 hover:bg-zinc-50',
                                         )}
                                     >
@@ -284,9 +291,9 @@ export function DateRangePicker({ className }: DateRangePickerProps) {
                                     />
                                 </div>
                             )}
-                        </div>
+                        </div>}
 
-                        <Separator />
+                        {!isAllTime && <Separator />}
 
                         {/* Actions */}
                         <div className="flex items-center justify-between px-4 py-3">
@@ -307,7 +314,7 @@ export function DateRangePicker({ className }: DateRangePickerProps) {
                                     size="sm"
                                     disabled={!tempFrom || !tempTo}
                                     onClick={handleApply}
-                                    className="bg-indigo-600 text-white hover:bg-indigo-700"
+                                    className="bg-primary text-primary-foreground hover:bg-primary/90"
                                 >
                                     Apply
                                 </Button>

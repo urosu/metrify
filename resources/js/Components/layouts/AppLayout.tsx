@@ -1,14 +1,15 @@
 import { Link, router, usePage } from '@inertiajs/react';
-import { Toaster } from '@/components/ui/sonner';
+import { Toaster } from '@/Components/ui/sonner';
 import { toast } from 'sonner';
 import { AlertBanner } from '@/Components/shared/AlertBanner';
 import {
     LayoutDashboard,
     Store,
     BarChart2,
+    TrendingUp,
     Lightbulb,
-    Settings,
     Bell,
+    CalendarDays,
     ChevronDown,
     Menu,
     X,
@@ -21,14 +22,20 @@ import {
     ShieldCheck,
     Search,
     ChevronRight,
-    Clipboard,
     Building2,
     ScrollText,
+    ListOrdered,
     Bug,
     FileCode2,
+    Globe,
+    Gauge,
+    Settings,
+    Tag,
+    Trophy,
 } from 'lucide-react';
 import { PropsWithChildren, ReactNode, useEffect, useState } from 'react';
 import { cn } from '@/lib/utils';
+import { wurl } from '@/lib/workspace-url';
 import { PageProps, Store as StoreType, Workspace } from '@/types';
 
 // ─── Nav config types ─────────────────────────────────────────────────────────
@@ -52,12 +59,6 @@ interface NavGroup {
     basePaths: string[];
     children: FlatNavItem[];
 }
-
-interface NavFlat extends FlatNavItem {
-    type: 'flat';
-}
-
-type NavEntry = NavGroup | NavFlat;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -93,12 +94,12 @@ function SidebarLink({
                 'group flex items-center gap-2.5 rounded-lg px-3 py-1.5 text-sm font-medium transition-colors',
                 indent ? 'pl-8' : '',
                 active
-                    ? 'bg-indigo-50 text-indigo-600'
+                    ? 'bg-primary/10 text-primary'
                     : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900',
             )}
         >
             {Icon && (
-                <Icon className={cn('h-4 w-4 shrink-0', active ? 'text-indigo-600' : 'text-zinc-400 group-hover:text-zinc-600')} />
+                <Icon className={cn('h-4 w-4 shrink-0', active ? 'text-primary' : 'text-zinc-400 group-hover:text-zinc-600')} />
             )}
             <span className="flex-1 truncate">{item.label}</span>
             {item.indicator && (
@@ -140,16 +141,16 @@ function SidebarGroupItem({
                 className={cn(
                     'flex w-full items-center gap-2.5 rounded-lg px-3 py-1.5 text-sm font-medium transition-colors',
                     active
-                        ? 'text-indigo-600'
+                        ? 'text-primary'
                         : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900',
                 )}
             >
-                <Icon className={cn('h-4 w-4 shrink-0', active ? 'text-indigo-600' : 'text-zinc-400')} />
+                <Icon className={cn('h-4 w-4 shrink-0', active ? 'text-primary' : 'text-zinc-400')} />
                 <span className="flex-1 text-left">{group.label}</span>
                 <ChevronRight
                     className={cn(
                         'h-3.5 w-3.5 shrink-0 transition-transform',
-                        active ? 'text-indigo-400' : 'text-zinc-300',
+                        active ? 'text-primary/60' : 'text-zinc-300',
                         isOpen && 'rotate-90',
                     )}
                 />
@@ -180,7 +181,7 @@ function WorkspaceSwitcher({ workspace, workspaces }: { workspace: Workspace | u
                 onClick={() => setOpen((v) => !v)}
                 className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-100 transition-colors"
             >
-                <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded bg-indigo-600 text-xs font-bold text-white">
+                <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded bg-primary text-xs font-bold text-primary-foreground">
                     {workspace.name.charAt(0).toUpperCase()}
                 </div>
                 <span className="flex-1 truncate text-left">{workspace.name}</span>
@@ -197,14 +198,14 @@ function WorkspaceSwitcher({ workspace, workspaces }: { workspace: Workspace | u
                         {workspaces?.map((w) => (
                             <button
                                 key={w.id}
-                                onClick={() => { setOpen(false); router.get(`/workspaces/${w.id}/switch`); }}
+                                onClick={() => { setOpen(false); router.post(`/workspaces/${w.id}/switch`); }}
                                 className="flex w-full items-center gap-2 px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50 transition-colors"
                             >
-                                <div className="flex h-5 w-5 shrink-0 items-center justify-center rounded bg-indigo-100 text-xs font-semibold text-indigo-700">
+                                <div className="flex h-5 w-5 shrink-0 items-center justify-center rounded bg-primary/15 text-xs font-semibold text-primary">
                                     {w.name.charAt(0).toUpperCase()}
                                 </div>
                                 <span className="flex-1 truncate text-left">{w.name}</span>
-                                {w.id === workspace.id && <Check className="h-3.5 w-3.5 text-indigo-600" />}
+                                {w.id === workspace.id && <Check className="h-3.5 w-3.5 text-primary" />}
                             </button>
                         ))}
                     </div>
@@ -216,14 +217,27 @@ function WorkspaceSwitcher({ workspace, workspaces }: { workspace: Workspace | u
 
 // ─── User menu ────────────────────────────────────────────────────────────────
 
-function UserMenu({ name, email, isSuperAdmin, workspaceRole }: { name: string; email: string; isSuperAdmin: boolean; workspaceRole: 'owner' | 'admin' | 'member' | null | undefined }) {
+function UserMenu({
+    name,
+    email,
+    isSuperAdmin,
+    workspaceRole,
+    workspaceSlug,
+}: {
+    name: string;
+    email: string;
+    isSuperAdmin: boolean;
+    workspaceRole: 'owner' | 'admin' | 'member' | null | undefined;
+    workspaceSlug: string | undefined;
+}) {
     const [open, setOpen] = useState(false);
+    const w = (path: string) => wurl(workspaceSlug, path);
 
     return (
         <div className="relative">
             <button
                 onClick={() => setOpen((v) => !v)}
-                className="flex h-8 w-8 items-center justify-center rounded-full bg-indigo-100 text-sm font-semibold text-indigo-700 hover:bg-indigo-200 transition-colors"
+                className="flex h-8 w-8 items-center justify-center rounded-full bg-primary/15 text-sm font-semibold text-primary hover:bg-primary/20 transition-colors"
                 title={name}
             >
                 {name.charAt(0).toUpperCase()}
@@ -237,11 +251,11 @@ function UserMenu({ name, email, isSuperAdmin, workspaceRole }: { name: string; 
                             <div className="text-sm font-medium text-zinc-900 truncate">{name}</div>
                             <div className="text-xs text-zinc-400 truncate">{email}</div>
                         </div>
-                        <Link href="/settings/profile" onClick={() => setOpen(false)} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50 transition-colors">
+                        <Link href={w('/settings/profile')} onClick={() => setOpen(false)} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50 transition-colors">
                             <User className="h-4 w-4 text-zinc-400" /> Profile
                         </Link>
                         {(isSuperAdmin || workspaceRole === 'owner') && (
-                            <Link href="/settings/billing" onClick={() => setOpen(false)} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50 transition-colors">
+                            <Link href={w('/settings/billing')} onClick={() => setOpen(false)} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50 transition-colors">
                                 <CreditCard className="h-4 w-4 text-zinc-400" /> Billing
                             </Link>
                         )}
@@ -263,6 +277,9 @@ function UserMenu({ name, email, isSuperAdmin, workspaceRole }: { name: string; 
                                     <Link href="/admin/logs" onClick={() => setOpen(false)} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50 transition-colors">
                                         <ScrollText className="h-4 w-4 text-zinc-400" /> Logs
                                     </Link>
+                                    <Link href="/admin/queue" onClick={() => setOpen(false)} className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50 transition-colors">
+                                        <ListOrdered className="h-4 w-4 text-zinc-400" /> Queue
+                                    </Link>
                                 </div>
                             </>
                         )}
@@ -280,9 +297,10 @@ function UserMenu({ name, email, isSuperAdmin, workspaceRole }: { name: string; 
 
 // ─── Alert bell ───────────────────────────────────────────────────────────────
 
-function AlertBell({ count }: { count: number }) {
+function AlertBell({ count, workspaceSlug }: { count: number; workspaceSlug: string | undefined }) {
+    const href = wurl(workspaceSlug, '/insights');
     return (
-        <Link href="/insights" className="relative flex h-8 w-8 items-center justify-center rounded-lg text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700 transition-colors" title="Alerts">
+        <Link href={href} className="relative flex h-8 w-8 items-center justify-center rounded-lg text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700 transition-colors" title="Alerts">
             <Bell className="h-4 w-4" />
             {count > 0 && (
                 <span className="absolute -right-0.5 -top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-red-600 text-[10px] font-bold text-white">
@@ -298,85 +316,126 @@ function AlertBell({ count }: { count: number }) {
 function buildSettingsItems(
     role: 'owner' | 'admin' | 'member' | null | undefined,
     isSuperAdmin: boolean,
+    w: (path: string) => string,
 ): FlatNavItem[] {
     const isOwnerOrAdmin = isSuperAdmin || role === 'owner' || role === 'admin';
     const isOwner        = isSuperAdmin || role === 'owner';
 
     return [
-        { label: 'Profile', href: '/settings/profile', icon: User },
+        { label: 'Profile',        href: w('/settings/profile'),        icon: User },
+        { label: 'Notifications',  href: w('/settings/notifications'),  icon: Bell },
         ...(isOwnerOrAdmin ? [
-            { label: 'Workspace',    href: '/settings/workspace',    icon: Settings },
-            { label: 'Integrations', href: '/settings/integrations', icon: Puzzle },
-            { label: 'Team',         href: '/settings/team',         icon: Users },
+            { label: 'Workspace',    href: w('/settings/workspace'),    icon: Settings },
+            { label: 'Events',       href: w('/settings/events'),       icon: CalendarDays },
+            { label: 'Integrations', href: w('/settings/integrations'), icon: Puzzle },
+            { label: 'Team',         href: w('/settings/team'),         icon: Users },
         ] : []),
         ...(isOwner ? [
-            { label: 'Billing', href: '/settings/billing', icon: CreditCard },
+            { label: 'Billing', href: w('/settings/billing'), icon: CreditCard },
         ] : []),
     ];
 }
 
-function buildNavEntries(
-    stores: StoreType[],
-    hasAdAccounts: boolean,
-    hasGsc: boolean,
-): NavEntry[] {
-    // "All stores" always at top, individual stores listed below
-    const storeChildren: FlatNavItem[] = [
-        { label: 'All stores', href: '/stores', exact: true },
-        ...stores.map((s) => ({ label: s.name, href: `/stores/${s.slug}/overview` })),
+// ─── Winners / Losers accordion ───────────────────────────────────────────────
+
+/**
+ * Inline sidebar accordion that deep-links to per-page winner/loser filter views.
+ * See: PLANNING.md "Winners/Losers" — Phase 1.4 chips, sidebar shortcut in Phase 1.3
+ */
+function WinnersLosersAccordion({ workspaceSlug, onClick }: { workspaceSlug: string | undefined; onClick?: () => void }) {
+    const pathname = typeof window !== 'undefined' ? window.location.pathname : '';
+    const w = (path: string) => wurl(workspaceSlug, path);
+
+    // Active when any of the winner/loser deep-link destinations is current
+    const isActive = [w('/campaigns'), w('/analytics/products'), w('/stores')].some(
+        (p) => pathname === p || pathname.startsWith(p + '/'),
+    );
+
+    const [open, setOpen] = useState(isActive);
+
+    // Carry the current page's date range to the target page so the user doesn't
+    // lose their selected period when clicking a sidebar winner/loser link.
+    const dateQuery = (() => {
+        if (typeof window === 'undefined') return '';
+        const p = new URLSearchParams(window.location.search);
+        const parts: string[] = [];
+        if (p.get('from')) parts.push(`from=${p.get('from')}`);
+        if (p.get('to'))   parts.push(`to=${p.get('to')}`);
+        return parts.length ? '&' + parts.join('&') : '';
+    })();
+
+    const items: { label: string; href: string; filter: string }[] = [
+        { label: 'Campaigns — Winners', href: w('/campaigns'),          filter: 'winners' },
+        { label: 'Campaigns — Losers',  href: w('/campaigns'),          filter: 'losers'  },
+        { label: 'Products — Winners',  href: w('/analytics/products'), filter: 'winners' },
+        { label: 'Products — Losers',   href: w('/analytics/products'), filter: 'losers'  },
+        { label: 'Stores — Winners',    href: w('/stores'),             filter: 'winners' },
+        { label: 'Stores — Losers',     href: w('/stores'),             filter: 'losers'  },
     ];
 
-    return [
-        {
-            type: 'group',
-            key: 'performance',
-            label: 'Performance',
-            icon: LayoutDashboard,
-            basePaths: ['/dashboard', '/analytics', '/countries'],
-            children: [
-                { label: 'Overview',    href: '/dashboard' },
-                { label: 'Daily',       href: '/analytics/daily' },
-                { label: 'By Country',  href: '/countries' },
-                { label: 'By Product',  href: '/analytics/products' },
-            ],
-        },
-        {
-            type: 'flat',
-            label: 'Campaigns',
-            href: '/campaigns',
-            icon: BarChart2,
-            indicator: !hasAdAccounts,
-        },
-        {
-            type: 'group',
-            key: 'stores',
-            label: 'Stores',
-            icon: Store,
-            basePaths: ['/stores'],
-            children: storeChildren,
-        },
-        {
-            type: 'flat',
-            label: 'SEO',
-            href: '/seo',
-            icon: Search,
-            indicator: !hasGsc,
-        },
-        {
-            type: 'flat',
-            label: 'Insights',
-            href: '/insights',
-            icon: Lightbulb,
-        },
-    ];
+    return (
+        <div>
+            <button
+                onClick={() => setOpen((v) => !v)}
+                className={cn(
+                    'flex w-full items-center gap-2.5 rounded-lg px-3 py-1.5 text-sm font-medium transition-colors',
+                    isActive
+                        ? 'text-primary'
+                        : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900',
+                )}
+            >
+                <Trophy className={cn('h-4 w-4 shrink-0', isActive ? 'text-primary' : 'text-zinc-400')} />
+                <span className="flex-1 text-left">Winners / Losers</span>
+                <ChevronRight
+                    className={cn(
+                        'h-3.5 w-3.5 shrink-0 transition-transform',
+                        isActive ? 'text-primary/60' : 'text-zinc-300',
+                        open && 'rotate-90',
+                    )}
+                />
+            </button>
+
+            {open && (
+                <div className="mt-0.5 space-y-0.5">
+                    {items.map((item) => {
+                        const href = `${item.href}?filter=${item.filter}${dateQuery}`;
+                        const active = pathname === item.href && typeof window !== 'undefined'
+                            && new URLSearchParams(window.location.search).get('filter') === item.filter;
+                        return (
+                            <Link
+                                key={`${item.href}-${item.filter}`}
+                                href={href}
+                                onClick={onClick}
+                                className={cn(
+                                    'flex items-center gap-2.5 rounded-lg pl-8 pr-3 py-1.5 text-sm font-medium transition-colors',
+                                    active
+                                        ? 'bg-primary/10 text-primary'
+                                        : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900',
+                                )}
+                            >
+                                {item.label}
+                            </Link>
+                        );
+                    })}
+                </div>
+            )}
+        </div>
+    );
+}
+
+// Section header rendered between nav groups
+function SectionLabel({ label }: { label: string }) {
+    return (
+        <div className="px-3 pt-4 pb-1 text-[10px] font-semibold text-zinc-400 uppercase tracking-widest select-none">
+            {label}
+        </div>
+    );
 }
 
 function Sidebar({
     workspace,
     workspaces,
     stores,
-    hasAdAccounts,
-    hasGsc,
     isSuperAdmin,
     workspaceRole,
     onClose,
@@ -384,47 +443,40 @@ function Sidebar({
     workspace: Workspace | undefined;
     workspaces: Workspace[] | undefined;
     stores: StoreType[];
-    hasAdAccounts: boolean;
-    hasGsc: boolean;
     isSuperAdmin: boolean;
     workspaceRole: 'owner' | 'admin' | 'member' | null | undefined;
     onClose?: () => void;
 }) {
     const pathname = typeof window !== 'undefined' ? window.location.pathname : '';
+    const slug = workspace?.slug;
+    const w = (path: string) => wurl(slug, path);
 
-    const navEntries = buildNavEntries(stores, hasAdAccounts, hasGsc);
-
-    // Auto-determine which group should be open based on current path
-    const defaultOpen = (): string | null => {
-        for (const entry of navEntries) {
-            if (entry.type === 'group' && matchesPath(pathname, entry.basePaths)) {
-                return entry.key;
-            }
-        }
-        return null;
+    // Stores group: "All Stores" + individual store links
+    const storesGroup: NavGroup = {
+        type: 'group',
+        key: 'stores',
+        label: 'Stores',
+        icon: Store,
+        basePaths: [w('/stores')],
+        children: [
+            { label: 'All Stores', href: w('/stores'), exact: true },
+            ...stores.map((s) => ({ label: s.name, href: w(`/stores/${s.slug}/overview`) })),
+        ],
     };
 
-    const [openGroup, setOpenGroup] = useState<string | null>(defaultOpen);
+    const isStoresOpen = matchesPath(pathname, [w('/stores')]);
+    const [storesOpen, setStoresOpen] = useState(isStoresOpen);
 
-    // Re-compute when pathname changes (Inertia navigation)
     useEffect(() => {
-        setOpenGroup(defaultOpen());
+        setStoresOpen(matchesPath(pathname, [w('/stores')]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [pathname]);
-
-    const toggleGroup = (key: string) => {
-        // Don't collapse the group whose path we're currently on
-        if (defaultOpen() === key) return;
-        setOpenGroup((prev) => (prev === key ? null : key));
-    };
-
-    const settingsActive = pathname.startsWith('/settings');
 
     return (
         <aside className="flex h-full w-[220px] flex-col border-r border-zinc-200 bg-white">
             {/* Logo */}
             <div className="flex h-14 shrink-0 items-center justify-between border-b border-zinc-100 px-4">
-                <Link href="/dashboard" className="text-lg font-bold text-zinc-900 tracking-tight">
+                <Link href={w('/dashboard')} className="text-lg font-bold text-zinc-900 tracking-tight">
                     Nexstage
                 </Link>
                 {onClose && (
@@ -435,54 +487,113 @@ function Sidebar({
             </div>
 
             {/* Main nav */}
-            <nav className="flex-1 overflow-y-auto px-3 py-3 space-y-0.5">
-                {navEntries.map((entry) => {
-                    if (entry.type === 'group') {
-                        return (
-                            <SidebarGroupItem
-                                key={entry.key}
-                                group={entry}
-                                isOpen={openGroup === entry.key}
-                                onToggle={() => toggleGroup(entry.key)}
-                                onClick={onClose}
-                            />
-                        );
-                    }
-                    return <SidebarLink key={entry.href} item={entry} onClick={onClose} />;
-                })}
+            <nav className="flex-1 overflow-y-auto px-3 py-3">
+                {/* Overview — always visible */}
+                <SidebarLink
+                    item={{ label: 'Overview', href: w('/dashboard'), icon: LayoutDashboard, exact: true }}
+                    onClick={onClose}
+                />
+
+                {/* Channels */}
+                <SectionLabel label="Channels" />
+                <div className="space-y-0.5">
+                    <SidebarLink
+                        item={{
+                            label: 'Paid Ads',
+                            href: w('/campaigns'),
+                            icon: BarChart2,
+                            indicator: !(workspace?.has_ads ?? false),
+                        }}
+                        onClick={onClose}
+                    />
+                    <SidebarLink
+                        item={{
+                            label: 'Organic Search',
+                            href: w('/seo'),
+                            icon: TrendingUp,
+                            indicator: !(workspace?.has_gsc ?? false),
+                        }}
+                        onClick={onClose}
+                    />
+                    <SidebarLink
+                        item={{
+                            label: 'Site Performance',
+                            href: w('/performance'),
+                            icon: Gauge,
+                            indicator: !(workspace?.has_psi ?? false),
+                        }}
+                        onClick={onClose}
+                    />
+                </div>
+
+                {/* Analytics */}
+                <SectionLabel label="Analytics" />
+                <div className="space-y-0.5">
+                    <SidebarLink item={{ label: 'Daily Breakdown', href: w('/analytics/daily'),    icon: Globe }}    onClick={onClose} />
+                    <SidebarLink item={{ label: 'By Product',      href: w('/analytics/products'), icon: Search }}   onClick={onClose} />
+                    <SidebarLink item={{ label: 'By Country',      href: w('/countries'),           icon: Globe }}    onClick={onClose} />
+                    <WinnersLosersAccordion workspaceSlug={slug} onClick={onClose} />
+                </div>
+
+                {/* Stores */}
+                <SectionLabel label="Stores" />
+                <div className="space-y-0.5">
+                    <SidebarGroupItem
+                        group={storesGroup}
+                        isOpen={storesOpen}
+                        onToggle={() => {
+                            if (!isStoresOpen) setStoresOpen((v) => !v);
+                        }}
+                        onClick={onClose}
+                    />
+                </div>
+
+                {/* Insights — always visible */}
+                <div className="mt-0.5">
+                    <SidebarLink item={{ label: 'Insights', href: w('/insights'), icon: Lightbulb }} onClick={onClose} />
+                </div>
+
+                {/* Tools — shown when store or ads connected */}
+                {(workspace?.has_store || workspace?.has_ads) && (
+                    <>
+                        <SectionLabel label="Tools" />
+                        <div className="space-y-0.5">
+                            <SidebarLink item={{ label: 'Tag Generator', href: w('/manage/tag-generator'), icon: Tag }} onClick={onClose} />
+                        </div>
+                    </>
+                )}
 
                 {/* Settings */}
-                <div className="pt-4">
-                    <div className="px-3 pb-1.5 text-xs font-medium text-zinc-400 uppercase tracking-wide">
-                        Settings
-                    </div>
-                    {buildSettingsItems(workspaceRole, isSuperAdmin).map((item) => (
+                <SectionLabel label="Settings" />
+                <div className="space-y-0.5">
+                    {buildSettingsItems(workspaceRole, isSuperAdmin, w).map((item) => (
                         <SidebarLink key={item.href} item={item} onClick={onClose} />
                     ))}
                 </div>
 
                 {/* Admin */}
                 {isSuperAdmin && (
-                    <div className="pt-4">
-                        <div className="px-3 pb-1.5 text-xs font-medium text-zinc-400 uppercase tracking-wide">
-                            Admin
+                    <>
+                        <SectionLabel label="Admin" />
+                        <div className="space-y-0.5">
+                            <SidebarLink item={{ label: 'Overview',   href: '/admin/overview',   icon: ShieldCheck }} onClick={onClose} />
+                            <SidebarLink item={{ label: 'Workspaces', href: '/admin/workspaces', icon: Building2 }}   onClick={onClose} />
+                            <SidebarLink item={{ label: 'Users',      href: '/admin/users',      icon: Users }}       onClick={onClose} />
+                            <SidebarLink item={{ label: 'Logs',       href: '/admin/logs',       icon: ScrollText }}  onClick={onClose} />
+                            <SidebarLink item={{ label: 'Queue',      href: '/admin/queue',      icon: ListOrdered }} onClick={onClose} />
                         </div>
-                        <SidebarLink item={{ label: 'Overview',   href: '/admin/overview',    icon: ShieldCheck }} onClick={onClose} />
-                        <SidebarLink item={{ label: 'Workspaces', href: '/admin/workspaces', icon: Building2 }}   onClick={onClose} />
-                        <SidebarLink item={{ label: 'Users',      href: '/admin/users',       icon: Users }}       onClick={onClose} />
-                        <SidebarLink item={{ label: 'Logs',       href: '/admin/logs',        icon: ScrollText }}  onClick={onClose} />
-                    </div>
+                    </>
                 )}
 
                 {/* Dev */}
                 {isSuperAdmin && (
-                    <div className="pt-4">
-                        <div className="px-3 pb-1.5 text-xs font-medium text-zinc-400 uppercase tracking-wide">
-                            Dev
+                    <>
+                        <SectionLabel label="Dev" />
+                        <div className="space-y-0.5">
+                            <SidebarLink item={{ label: 'Snippets', href: '/admin/dev/snippets', icon: FileCode2 }} onClick={onClose} />
+                            <SidebarLink item={{ label: 'Debug',    href: '/admin/dev/debug',    icon: Bug }}       onClick={onClose} />
                         </div>
-                        <SidebarLink item={{ label: 'Snippets', href: '/admin/dev/snippets', icon: FileCode2 }} onClick={onClose} />
-                        <SidebarLink item={{ label: 'Debug',    href: '/admin/dev/debug',    icon: Bug }}       onClick={onClose} />
-                    </div>
+                    </>
                 )}
             </nav>
 
@@ -509,8 +620,6 @@ export default function AppLayout({ children, topBarRight, dateRangePicker }: Ap
         workspaces,
         stores,
         unread_alerts_count,
-        has_ad_accounts,
-        has_gsc,
         workspace_role,
         impersonating,
         impersonated_user_name,
@@ -519,6 +628,8 @@ export default function AppLayout({ children, topBarRight, dateRangePicker }: Ap
 
     const isSuperAdmin = auth.user.is_super_admin;
     const [sidebarOpen, setSidebarOpen] = useState(false);
+    const slug = workspace?.slug;
+    const w = (path: string) => wurl(slug, path);
 
     useEffect(() => {
         if (flash?.success) toast.success(flash.success);
@@ -538,11 +649,10 @@ export default function AppLayout({ children, topBarRight, dateRangePicker }: Ap
         const hasPlan = !!workspace.billing_plan;
 
         if (hasPlan) {
-            // Active subscription but no payment method on file
             return {
                 message: 'No payment method on file. Your subscription may be cancelled. Please add one in billing settings.',
                 severity: 'warning' as const,
-                action: { label: 'Go to billing', href: route('settings.billing') },
+                action: { label: 'Go to billing', href: w('/settings/billing') },
             };
         }
 
@@ -550,7 +660,7 @@ export default function AppLayout({ children, topBarRight, dateRangePicker }: Ap
             return {
                 message: `Your trial ends in ${daysLeft} day${daysLeft === 1 ? '' : 's'}. Add a payment method to keep access.`,
                 severity: daysLeft <= 3 ? 'critical' as const : 'warning' as const,
-                action: { label: 'Add payment method', href: route('settings.billing') },
+                action: { label: 'Add payment method', href: w('/settings/billing') },
             };
         }
 
@@ -573,8 +683,6 @@ export default function AppLayout({ children, topBarRight, dateRangePicker }: Ap
                     workspace={workspace}
                     workspaces={workspaces}
                     stores={stores ?? []}
-                    hasAdAccounts={has_ad_accounts ?? false}
-                    hasGsc={has_gsc ?? false}
                     isSuperAdmin={isSuperAdmin}
                     workspaceRole={workspace_role}
                     onClose={() => setSidebarOpen(false)}
@@ -613,8 +721,14 @@ export default function AppLayout({ children, topBarRight, dateRangePicker }: Ap
                     </div>
                     <div className="flex shrink-0 items-center gap-1">
                         {topBarRight}
-                        <AlertBell count={unread_alerts_count ?? 0} />
-                        <UserMenu name={auth.user.name} email={auth.user.email} isSuperAdmin={isSuperAdmin} workspaceRole={workspace_role} />
+                        <AlertBell count={unread_alerts_count ?? 0} workspaceSlug={slug} />
+                        <UserMenu
+                            name={auth.user.name}
+                            email={auth.user.email}
+                            isSuperAdmin={isSuperAdmin}
+                            workspaceRole={workspace_role}
+                            workspaceSlug={slug}
+                        />
                     </div>
                 </header>
 

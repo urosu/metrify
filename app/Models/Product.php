@@ -8,6 +8,7 @@ use App\Scopes\WorkspaceScope;
 use Illuminate\Database\Eloquent\Attributes\ScopedBy;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 
 #[ScopedBy([WorkspaceScope::class])]
 class Product extends Model
@@ -22,6 +23,9 @@ class Product extends Model
         'status',
         'image_url',
         'product_url',
+        'stock_status',
+        'stock_quantity',
+        'product_type',
         'platform_updated_at',
     ];
 
@@ -41,5 +45,10 @@ class Product extends Model
     public function store(): BelongsTo
     {
         return $this->belongsTo(Store::class);
+    }
+
+    public function categories(): BelongsToMany
+    {
+        return $this->belongsToMany(ProductCategory::class, 'product_category_product', 'product_id', 'category_id');
     }
 }

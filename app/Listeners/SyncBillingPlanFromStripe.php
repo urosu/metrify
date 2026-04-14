@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Listeners;
 
+use App\Jobs\TriggerReactivationBackfillJob;
 use App\Models\Workspace;
 use Illuminate\Support\Facades\Log;
 use Laravel\Cashier\Events\WebhookReceived;
@@ -38,7 +39,8 @@ class SyncBillingPlanFromStripe
 
         $workspace = Workspace::withoutGlobalScopes()
             ->where('stripe_id', $stripeId)
-            ->select(['id', 'billing_plan'])
+            ->whereNull('deleted_at')
+            ->select(['id', 'billing_plan', 'trial_ends_at'])
             ->first();
 
         if ($workspace === null) {
@@ -58,6 +60,8 @@ class SyncBillingPlanFromStripe
     {
         $plan = $this->resolvePlanFromSubscription($subscription);
 
+        $wasFrozen = $this->isFrozen($workspace);
+
         $workspace->billing_plan = $plan;
         $workspace->save();
 
@@ -65,11 +69,17 @@ class SyncBillingPlanFromStripe
             'workspace_id' => $workspace->id,
             'billing_plan' => $plan,
         ]);
+
+        if ($wasFrozen && $plan !== null) {
+            $this->triggerReactivationBackfill($workspace);
+        }
     }
 
     private function handleUpdated(Workspace $workspace, array $subscription): void
     {
         $plan = $this->resolvePlanFromSubscription($subscription);
+
+        $wasFrozen = $this->isFrozen($workspace);
 
         $workspace->billing_plan = $plan;
         $workspace->save();
@@ -78,6 +88,10 @@ class SyncBillingPlanFromStripe
             'workspace_id' => $workspace->id,
             'billing_plan' => $plan,
         ]);
+
+        if ($wasFrozen && $plan !== null) {
+            $this->triggerReactivationBackfill($workspace);
+        }
     }
 
     private function handleDeleted(Workspace $workspace): void
@@ -94,7 +108,7 @@ class SyncBillingPlanFromStripe
      * Resolve billing_plan string from a Stripe subscription object.
      *
      * Looks up the active price ID against config/billing.php flat_plans and
-     * percentage_plan. Returns null if no match (treated as no active plan).
+     * scale_plan. Returns null if no match (treated as no active plan).
      */
     private function resolvePlanFromSubscription(array $subscription): ?string
     {
@@ -116,15 +130,48 @@ class SyncBillingPlanFromStripe
             }
         }
 
-        // Check percentage plan.
-        $percentagePriceId = config('billing.percentage_plan.price_id');
+        // Check Scale plan (metered). DB plan key is 'scale'.
+        $scalePriceId = config('billing.scale_plan.price_id');
 
-        if ($percentagePriceId !== null && $priceId === $percentagePriceId) {
-            return 'percentage';
+        if ($scalePriceId !== null && $priceId === $scalePriceId) {
+            return 'scale';
         }
 
         Log::warning('SyncBillingPlanFromStripe: unrecognised price ID', ['price_id' => $priceId]);
 
         return null;
+    }
+
+    /**
+     * A workspace is "frozen" when its trial has expired and it has no billing plan.
+     * Frozen workspaces have all sync jobs blocked at the scheduler and job handle() level.
+     * See: PLANNING.md "14-day free trial — freeze"
+     */
+    private function isFrozen(Workspace $workspace): bool
+    {
+        return $workspace->billing_plan === null
+            && $workspace->trial_ends_at !== null
+            && $workspace->trial_ends_at->lt(now());
+    }
+
+    /**
+     * Dispatch a catch-up import for the gap period between freeze and now.
+     *
+     * Why trial_ends_at as gap start: that is the exact date sync jobs stopped
+     * running. Any data from that date onwards is missing and needs backfilling.
+     * See: PLANNING.md "Reactivation after freeze"
+     */
+    private function triggerReactivationBackfill(Workspace $workspace): void
+    {
+        // trial_ends_at is the day sync stopped — that's where the gap begins.
+        // We already checked trial_ends_at is not null in isFrozen().
+        $gapStart = $workspace->trial_ends_at->toDateString(); // @phpstan-ignore-line
+
+        TriggerReactivationBackfillJob::dispatch($workspace->id, $gapStart);
+
+        Log::info('SyncBillingPlanFromStripe: reactivation backfill dispatched', [
+            'workspace_id' => $workspace->id,
+            'gap_start'    => $gapStart,
+        ]);
     }
 }

@@ -30,10 +30,20 @@ class Order extends Model
         'total_in_reporting_currency',
         'customer_email_hash',
         'customer_country',
+        'customer_id',
+        'payment_method',
+        'payment_method_title',
+        'shipping_country',
+        'refund_amount',
+        'last_refunded_at',
         'utm_source',
         'utm_medium',
         'utm_campaign',
         'utm_content',
+        'utm_term',
+        'source_type',
+        'raw_meta',
+        'raw_meta_api_version',
         'occurred_at',
         'synced_at',
     ];
@@ -47,6 +57,9 @@ class Order extends Model
             'shipping' => 'decimal:4',
             'discount' => 'decimal:4',
             'total_in_reporting_currency' => 'decimal:4',
+            'refund_amount' => 'decimal:2',
+            'last_refunded_at' => 'datetime',
+            'raw_meta' => 'array',
             'occurred_at' => 'datetime',
             'synced_at' => 'datetime',
         ];
@@ -65,5 +78,15 @@ class Order extends Model
     public function items(): HasMany
     {
         return $this->hasMany(OrderItem::class);
+    }
+
+    public function coupons(): HasMany
+    {
+        return $this->hasMany(OrderCoupon::class);
+    }
+
+    public function refunds(): HasMany
+    {
+        return $this->hasMany(Refund::class);
     }
 }

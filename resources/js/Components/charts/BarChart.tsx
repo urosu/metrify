@@ -19,8 +19,15 @@ export interface BarChartDataPoint {
     compareValue?: number;
 }
 
+export interface BarSeriesConfig {
+    dataKey: string;
+    name: string;
+    color: string;
+    stackId?: string;
+}
+
 interface BarChartProps {
-    data: BarChartDataPoint[];
+    data: object[];
     granularity: Granularity;
     currency?: string;
     timezone?: string;
@@ -28,6 +35,8 @@ interface BarChartProps {
     seriesLabel?: string;
     compareLabel?: string;
     valueType?: 'currency' | 'number' | 'percent';
+    /** Multi-series stacked config. When provided, overrides the default value/compareValue rendering. */
+    series?: BarSeriesConfig[];
     /** Callback when a bar is clicked (e.g. drill into hourly) */
     onBarClick?: (dataPoint: BarChartDataPoint) => void;
     /** Annotate specific dates with a subtle reference line + amber marker */
@@ -82,26 +91,27 @@ const BarChartWrapper = React.memo(function BarChartWrapper({
     seriesLabel = 'Current',
     compareLabel = 'Previous',
     valueType = 'currency',
+    series,
     onBarClick,
     notes,
     loading = false,
     className,
 }: BarChartProps) {
     const merged = useMemo(() => {
-        if (!comparisonData?.length) return data;
+        if (series || !comparisonData?.length) return data;
         return data.map((point, i) => ({
             ...point,
             compareValue: comparisonData[i]?.value ?? null,
         }));
-    }, [data, comparisonData]);
+    }, [data, comparisonData, series]);
 
     if (loading) return <BarChartSkeleton />;
 
-    const hasComparison = !!comparisonData?.length;
+    const hasComparison = !series && !!comparisonData?.length;
 
     return (
         <div className={className ?? 'h-64 w-full'}>
-            <ResponsiveContainer width="100%" height="100%">
+            <ResponsiveContainer width="100%" height="100%" minWidth={0} initialDimension={{ width: 0, height: 1 }}>
                 <RechartsBarChart
                     data={merged}
                     margin={{ top: 4, right: 8, left: 0, bottom: 0 }}
@@ -156,30 +166,46 @@ const BarChartWrapper = React.memo(function BarChartWrapper({
                         }}
                         labelFormatter={(label) => formatDate(String(label), granularity, timezone)}
                     />
-                    {hasComparison && <Legend wrapperStyle={{ fontSize: 12 }} />}
-                    {hasComparison && (
-                        <Bar
-                            dataKey="compareValue"
-                            name={compareLabel}
-                            fill={COLORS.compare}
-                            radius={[3, 3, 0, 0]}
-                        />
-                    )}
-                    <Bar
-                        dataKey="value"
-                        name={seriesLabel}
-                        fill={COLORS.primary}
-                        radius={[3, 3, 0, 0]}
-                        style={onBarClick ? { cursor: 'pointer' } : undefined}
-                    >
-                        {merged.map((_, index) => (
-                            <Cell
-                                key={index}
-                                fill={COLORS.primary}
-                                className="hover:brightness-110 transition-all"
+                    {(hasComparison || series) && <Legend wrapperStyle={{ fontSize: 12 }} />}
+                    {series
+                        ? series.map((s) => (
+                            <Bar
+                                key={s.dataKey}
+                                dataKey={s.dataKey}
+                                name={s.name}
+                                fill={s.color}
+                                radius={[3, 3, 0, 0]}
+                                stackId={s.stackId}
                             />
-                        ))}
-                    </Bar>
+                          ))
+                        : (
+                            <>
+                                {hasComparison && (
+                                    <Bar
+                                        dataKey="compareValue"
+                                        name={compareLabel}
+                                        fill={COLORS.compare}
+                                        radius={[3, 3, 0, 0]}
+                                    />
+                                )}
+                                <Bar
+                                    dataKey="value"
+                                    name={seriesLabel}
+                                    fill={COLORS.primary}
+                                    radius={[3, 3, 0, 0]}
+                                    style={onBarClick ? { cursor: 'pointer' } : undefined}
+                                >
+                                    {merged.map((_, index) => (
+                                        <Cell
+                                            key={index}
+                                            fill={COLORS.primary}
+                                            className="hover:brightness-110 transition-all"
+                                        />
+                                    ))}
+                                </Bar>
+                            </>
+                          )
+                    }
                     {notes?.map(({ date, note }) => (
                         <ReferenceLine
                             key={date}
