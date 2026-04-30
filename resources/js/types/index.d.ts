@@ -25,6 +25,14 @@ export interface Workspace {
     has_psi: boolean;
 }
 
+/** Per-source availability flags shared via Inertia (from MetricSourceResolver). */
+export interface MetricSources {
+    has_facebook: boolean;
+    has_google: boolean;
+    has_gsc: boolean;
+    has_ga4: boolean;
+}
+
 export interface Store {
     id: number;
     slug: string;
@@ -101,6 +109,8 @@ export type PageProps<
     impersonating?: boolean;
     impersonated_user_name?: string | null;
     earliest_date?: string | null;
+    metricSources?: MetricSources;
+    chart_annotations?: Array<{ date: string; label: string; type?: string }>;
     flash?: {
         success?: string | null;
         error?: string | null;

@@ -12,9 +12,9 @@ The single source of truth for navigation, design tokens, shared components, and
 
 Nine rules. Every design decision must be consistent with these.
 
-1. **Show disagreement, don't hide it.** Every revenue metric carries a six-source badge row. "Not Tracked" is a visible bucket, and it can go negative when platforms over-report.
-2. **Reconciliation, not truth.** We never claim a number is "real" or "true" as a sales pitch. We label sources and show gaps. (Anti-pattern source: [Hyros](competitors/hyros.md).)
-3. **Few pages, deep pages.** 9 top-level routes. Each answers one real question.
+1. **Clean metrics over editorial framing.** Show one good number per metric, neutrally — like Shopify, Polar, Plausible. We compute six-source attribution under the hood; we don't editorialize about disagreement on every card. Source comparison is a drill-in detail, not the always-visible primary surface.
+2. **Best source auto-picked silently; comparison is drill-only.** Each metric card shows a single value from the best available source, chosen automatically (Real when it can be computed, Store as baseline, otherwise the most reliable platform source). The source comparison popover is available on demand — not forced on every view. (Anti-pattern: [Hyros](competitors/hyros.md) "we are the truth" framing; [Triple Whale](competitors/triple-whale.md) six-badge-row overload.)
+3. **Few pages, deep pages.** 12 top-level work routes + tool sub-routes. Each answers one real question.
 4. **URL-stateful everything.** Every filter, date range, active source persists in the URL. Users share links, not screenshots.
 5. **Skeleton over spinner.** Every loading state is a skeleton shimmer of the final shape. No spinners.
 6. **Never empty.** During sync, pre-populated demo data with a "Demo" banner. After sync, real data. Pattern source: [Putler](competitors/putler.md).
@@ -28,6 +28,8 @@ Nine rules. Every design decision must be consistent with these.
 
 ### Routes (v1)
 
+**Work pages (sidebar top group):**
+
 | # | Route | Page | What it answers |
 |---|---|---|---|
 | 1 | `/dashboard` | Dashboard | How is my business overall? (today / week / month) |
@@ -35,19 +37,39 @@ Nine rules. Every design decision must be consistent with these.
 | 3 | `/ads` | Ads | Which campaigns, adsets, ads, creatives are working? |
 | 4 | `/attribution` | Attribution | Why don't my platform numbers match my store? |
 | 5 | `/seo` | SEO | How am I ranking on Google? (GSC queries, pages, positions) |
-| 6 | `/products` | Products | Which products drive revenue, margin, LTV? |
-| 7 | `/profit` | Profit | What's my real P&L after COGS, shipping, fees, taxes, ad spend? Broken down how? |
-| 8 | `/customers` | Customers | Who are my customers, and how do they behave? (segments, cohorts, RFM) |
-| 9 | `/integrations` | Integrations | Are my connections healthy, what data am I missing? |
-| 10 | `/settings/*` | Settings | Workspace, team, **costs (COGS / shipping / fees / VAT)**, billing, notifications |
+| 6 | `/performance` | Performance | Are my pages fast? Where are CrUX losers? What does Lighthouse say? |
+| 7 | `/products` | Products | Which products drive revenue, margin, LTV? |
+| 8 | `/profit` | Profit | What's my P&L after COGS, shipping, fees, taxes, ad spend? Broken down how? |
+| 9 | `/customers` | Customers | Who are my customers, and how do they behave? (segments, cohorts, RFM) |
+| 10 | `/inventory` | Inventory | What's my stock vs predicted demand? Where am I going to stock out? |
+
+**Tools sub-routes (sidebar, collapsible under "Tools"):**
+
+| Route | Purpose |
+|---|---|
+| `/tools/tag-generator` | UTM tag builder synced with channel_mappings |
+| `/tools/channel-mappings` | Channel classification rules editor |
+| `/tools/naming-convention` | Campaign naming convention builder + validator |
+| `/tools/holidays` | Holiday / event calendar with annotation integration |
+
+**Utility pages (sidebar bottom group):**
+
+| Route | Page |
+|---|---|
+| `/integrations` | Are my connections healthy, what data am I missing? |
+| `/settings/*` | Workspace, team, **costs (COGS / shipping / fees / VAT)**, billing, notifications |
 
 Auth-only routes (`/auth/*`), onboarding (`/onboarding`), not listed in sidebar.
 
 ### Sidebar order
 
-Dashboard · Orders · Ads · Attribution · SEO · Products · Profit · Customers · — · Integrations · Settings
+**Top group (work pages):** Dashboard · Orders · Ads · Attribution · SEO · Performance · Products · Profit · Customers · Inventory
 
-Divider groups "work" vs "config". Hover-to-expand from collapsed state.
+**Divider**
+
+**Bottom group (utility):** Tools (collapsible: TagGenerator · ChannelMappings · NamingConvention · Holidays) · Integrations · Settings
+
+Hover-to-expand from collapsed state. SyncHealthIndicator lives in TopBar (not sidebar bottom).
 
 ### Out of scope for v1 (intentional)
 
@@ -86,18 +108,30 @@ Divider groups "work" vs "config". Hover-to-expand from collapsed state.
 | Zone | Contents |
 |---|---|
 | Left | WorkspaceSwitcher (hidden if single workspace) |
-| Center | Global filters: DateRangePicker · AttributionModelSelector · WindowSelector · **AccountingModeSelector** (§5.26) · SourceToggle · BreakdownSelector · ProfitMode toggle |
-| Right | **FreshnessIndicator** (§5.20) · CommandPaletteTrigger (Cmd+K) · NotificationsBell · UserMenu |
+| Center | DateRangePicker |
+| Right | **SyncHealthIndicator** (§5.20) · CommandPaletteTrigger (Cmd+K) · NotificationsBell · UserMenu |
 
-**Global filters propagate to every MetricCard, chart, and table on the page.** Per-card override is allowed but rendered subtly (subdued chip). Filter state is in URL.
+**Global filters removed from TopBar.** The following controls have been moved to in-page section-level controls: AttributionModelSelector, WindowSelector, AccountingModeSelector, SourceToggle, BreakdownSelector, ProfitMode toggle. See "Filters live in content, not chrome" below.
+
+DateRangePicker remains in TopBar as the one truly global control (date range applies across all pages). Filter state is URL-stateful.
 
 ### Sidebar
 
 - Width: 240px expanded, 64px collapsed. User preference persisted.
 - Logo + product name at top (clickable → `/dashboard`).
 - Item = icon + label. Active state = left border accent + bold label.
-- Flat structure; no nested items in v1.
-- Bottom: StatusDot for "Sync health" (click → `/integrations`).
+- **Top group**: 10 work pages (Dashboard, Orders, Ads, Attribution, SEO, Performance, Products, Profit, Customers, Inventory). Flat list.
+- **Divider** separating work pages from utility.
+- **Bottom group**: Tools (collapsible, reveals TagGenerator / ChannelMappings / NamingConvention / Holidays sub-items) · Integrations · Settings.
+- Sync health has moved to the TopBar `SyncHealthIndicator` — not in the sidebar bottom.
+
+### Filters live in content, not chrome
+
+**Rule:** Every page-level filter (source toggle, attribution model, window, accounting mode, breakdown dimension, profit mode) belongs in the page content, contextually adjacent to the section it affects. Do not put these in the global TopBar.
+
+**Rationale:** When a filter lives in TopBar, every page inherits it whether useful or not, and users cannot tell which subsection a filter change affects. Different pages may not need source filtering at all (e.g., `/seo` uses only GSC; putting a SourceToggle in TopBar on that page is noise).
+
+**Implementation:** Place a chip group, pill toggle, or dropdown directly above or beside the affected element. A source toggle above the Attribution Matrix is clear; a source toggle in the global chrome floating above everything is not. Each page spec must specify which filters it exposes and where.
 
 ### WorkspaceSwitcher
 
@@ -129,18 +163,23 @@ Tailwind CSS (already in project). shadcn/ui as component baseline. Recharts for
 
 ### Color tokens
 
+All colors are defined as CSS variables in `app.css` and referenced via Tailwind token aliases. CSS variables are the single source of truth — do not hardcode hex values in components.
+
+**Brand palette** (primary actions, active states, links):
+
+- `--color-primary`: teal-adjacent chromatic (teal-600 as Tailwind proxy). Used for primary buttons, active sidebar items, links, focus rings. Differentiates from Shopify-green and FB-blue.
+- `--color-primary-hover`: teal-700
+- `--color-primary-subtle`: teal-50 (backgrounds behind primary-tinted chips)
+- `--color-secondary`: rose/coral (rose-500 as Tailwind proxy). Used for destructive actions, cancel buttons, second-accent charts. WCAG AA on white: verify L ≤ 0.45.
+
 **Neutral palette** (backgrounds, borders, text):
 
 - `bg`: zinc-50 (light mode primary surface)
-- `surface`: white (cards, panels)
-- `border`: zinc-200
-- `text`: zinc-900 (primary), zinc-600 (secondary), zinc-400 (tertiary)
+- `surface`: white (cards, panels — Polaris-style white card on zinc-50 page)
+- `border`: zinc-200 (card borders, dividers; use zinc-100 for very subtle separators)
+- `text`: zinc-900 (primary), zinc-600 (secondary). Do not use zinc-400 for body text — fails WCAG AA on white.
 
-**Accent** (primary action, links, active states):
-
-- `accent`: teal-600 (differentiates from Shopify-green and FB-blue of competitors)
-- `accent-hover`: teal-700
-- `accent-subtle`: teal-50
+**Card style (Polaris-influenced):** white surface, zinc-100/200 border, 10px border-radius, 20–24px padding. No shadows on cards in default state; `box-shadow: 0 1px 3px rgba(0,0,0,.06)` on hover only.
 
 **Semantic** (status, metrics):
 
@@ -157,20 +196,26 @@ Tailwind CSS (already in project). shadcn/ui as component baseline. Recharts for
 | Facebook | `source-facebook` | indigo-500 | `#6366f1` | Meta brand adjacent |
 | Google Ads | `source-google` | amber-500 | `#f59e0b` | Distinct from semantic red |
 | GSC | `source-gsc` | emerald-500 | `#10b981` | Google green for search |
-| Site (GA4/first-party) | `source-site` | violet-500 | `#8b5cf6` | Separate from all platforms |
-| Real (Nexstage-computed) | `source-real` | yellow-400 | `#facc15` | Gold lightbulb per thesis |
+| GA4 | `source-ga4` | violet-500 | `#8b5cf6` | First-party / GA4; label is "GA4", token is `source-ga4` |
+| Real (Nexstage-computed) | `source-real` | zinc-500 | `#71717a` | Neutral — Real is a computation, not a brand claim; no gold |
 
-**Do not reassign these colors.** A Facebook line in a chart is always indigo-500. A Real badge is always yellow-400. This consistency is the whole trust UX.
+**Note on GA4 vs "Site":** The sixth source is GA4, not "Site". Display label is "GA4". CSS token is `source-ga4`. TypeScript union member is `'ga4'`. Any reference in this doc or page specs to "Site" should be read as "GA4".
+
+**Note on Real source color:** Real was previously gold/yellow-400 as a thesis signal. Under the new design direction, Real uses a neutral zinc chip — it is one computation among several, not a privileged "truth" signal. The gold/amber treatment is retired; use amber-500 only for the `warning` semantic state.
+
+**Do not reassign source colors.** A Facebook line in a chart is always indigo-500. A GA4 badge is always violet-500. Consistency enables users to build a mental model across pages.
 
 ### Typography
 
-- **Body**: Inter, 14px base. Sans-serif.
+- **Body**: Inter, 15–16px base. Sans-serif. 14px is the hard floor — never 11, 12, or 13px anywhere in the UI (including chart tick labels, legend labels, table column headers, badge text).
 - **Numbers**: Inter with `font-variant-numeric: tabular-nums`. Always tabular for KPI values.
-- **Code / IDs**: JetBrains Mono, 12.5px. Order IDs, customer emails in tables, SQL-like metric formulas.
+- **Code / IDs**: JetBrains Mono, 14px minimum. Order IDs, customer emails in tables, SQL-like metric formulas.
 
-Size scale: 11 / 12.5 / 14 / 16 / 20 / 28 / 40. No other sizes.
+Size scale: 14 / 15 / 16 / 20 / 28 / 40. No smaller than 14. No other sizes.
 
-Weight: 400 (body), 500 (emphasis), 600 (headings). Never 700+.
+Tailwind remapping: `text-xs` = 14px (not 12px), `text-sm` = 15px, `text-base` = 16px. Do not use arbitrary `text-[11px]`, `text-[12px]`, or `text-[13px]`.
+
+Weight: 400 (body), 500 (emphasis, metric values), 600 (headings). Never 700+.
 
 ### 4.1 Metric name syntax (typography as documentation)
 
@@ -182,7 +227,7 @@ The canonical metric label composes up to three parts:
 
 - **Name** — metric from [`_crosscut_metric_dictionary.md`](competitors/_crosscut_metric_dictionary.md) "Our pick" column. Examples: `Revenue`, `ROAS`, `CAC`, `LTV`, `MER`.
 - **Qualifier** — in parens, always present if metric carries a window or customer-type variant. Examples: `(7d click)`, `(28d)`, `(LTV)`, `(1st Time)`, `(blended)`. **Window first**, then customer-type when both apply: `ROAS (7d, 1st Time)`.
-- **Source** — after a middot, only when a single source is active. Examples: `ROAS · Facebook`, `Revenue · Store`. Omitted when source badges row (§5.1) is visible.
+- **Source** — after a middot, only when a non-default source is active (e.g., user opened the compare-sources popover and switched the card to Facebook). Examples: `ROAS · Facebook`, `Revenue · Store`. Omitted when auto-picked source (Real) is active — the default state shows no source suffix.
 
 When ProfitMode (§5.16) is on, the suffix-less name flips: `Revenue` → `Profit`; `ROAS` → `Profit ROAS`; `CAC` → `Profit-CAC`. Never prefix with "True" / "Real" (except the brand term Real Revenue) — see [`_crosscut_metric_dictionary.md`](competitors/_crosscut_metric_dictionary.md) §Naming principles rule 2.
 
@@ -206,39 +251,42 @@ Light mode only in v1. Dark mode deferred (see IA out-of-scope table).
 
 The named primitives every page reuses. Page specs reference by **PascalCase name**, not by re-describing.
 
-### 5.1 MetricCard — the signature primitive
+### 5.1 MetricCard — the primary data primitive
 
-The load-bearing component of the thesis.
+The core component for surfacing KPIs across every page. Polaris-influenced: white surface, zinc-100/200 border, 10px radius, 20–24px padding.
 
-**Anatomy** (top → bottom):
+**Default anatomy** (top → bottom):
 
-1. **Source badge row** — horizontal strip of up to 6 SourceBadges. Active source is filled; inactive sources are outlined and dimmer. Clicking a badge changes the active source for this card only.
-2. **Label** — metric name with suffix (`Revenue (28d)`, `ROAS (blended)`).
-3. **Value** — large number (28px tabular). If `%`, space before unit. If currency, symbol before value.
-4. **Delta** — arrow + percentage vs comparison period. Green up / red down semantically only — an up-arrow for "Not Tracked going up" is still green because it reflects the actual direction, even if the implication is bad. (Nuance: see anti-semantic rule in tooltip.)
-5. **Sparkline** — 30-point mini-chart of the active source over the current range.
-6. **ProfitMode indicator** (top-right, subtle icon) — when the global ProfitMode toggle is ON (or toggled locally on this card), the card flips from revenue-flavor to profit-flavor: "Revenue (28d)" becomes "Profit (28d)", ROAS becomes Profit ROAS, CAC becomes Profit-CAC. Source badges still apply — profit attributed to Facebook = FB-attributed revenue minus proportional costs. Metric definitions: [`_crosscut_metric_dictionary.md`](competitors/_crosscut_metric_dictionary.md) profit section.
+1. **Label** — metric name with suffix (`Revenue (28d)`, `ROAS (blended)`). 15px, zinc-600.
+2. **Value** — large number. `text-3xl` / `text-4xl` (28–36px) tabular. Weight 500. If `%`, space before unit. If currency, symbol before value.
+3. **Delta** — arrow + percentage vs comparison period. Green up / red down semantically only. Suppressed when ConfidenceChip threshold unmet.
+4. **Sparkline** — 30-point mini-chart of the active source over the current range.
+5. **"Compare sources" affordance** (bottom-right, subtle icon button) — clicking opens a popover that reveals all source values side-by-side. Hidden when fewer than 2 sources have data. This is the primary way source comparison surfaces — not always-visible badges.
+
+No always-visible source badge row by default. The best source is auto-picked silently (Real when computable, Store as baseline, otherwise the most reliable platform source). The active source can be shown as a small subdued label beneath the metric name if needed for clarity (`Source: Real`), but never as a full badge row unless the page explicitly requests it.
+
+**ProfitMode indicator** (top-right, subtle icon) — when ProfitMode is ON (globally or locally on this card), the card flips from revenue-flavor to profit-flavor: "Revenue (28d)" becomes "Profit (28d)", ROAS becomes Profit ROAS, CAC becomes Profit-CAC. Metric definitions: [`_crosscut_metric_dictionary.md`](competitors/_crosscut_metric_dictionary.md) profit section.
 
 **Interactions:**
 
-- Click body (not badge) → navigate to pre-filtered table on the relevant page (e.g., MetricCard "Revenue" on Dashboard → `/orders?source=real&date=...`).
-- Click SourceBadge → switch active source without navigation.
+- Click body → navigate to pre-filtered table on the relevant page (e.g., MetricCard "Revenue" on Dashboard → `/orders?date=...`).
+- Click "Compare sources" icon → popover shows all 6 source values side-by-side. Each source row in the popover is clickable to switch the card's active source.
 - Click ProfitMode icon → flip this card between revenue/profit flavor (overrides page-level ProfitMode).
-- Hover value → tooltip: formula + freshness ("Synced 12 min ago").
-- Hover card body → 📌 Pin icon top-right. Click → pin to user's personal "Pinned" row at top of Dashboard. Limit 8 pinned per user. Syncs across devices.
+- Hover value → tooltip: formula + active source + freshness ("Synced 12 min ago").
+- Hover card body → Pin icon top-right. Click → pin to user's personal "Pinned" row at top of Dashboard. Limit 8 pinned per user. Syncs across devices.
 - Long-press (mobile) → same as hover.
 
 **Variants:**
 
 - `MetricCard` — default, 240×140
 - `MetricCardCompact` — 180×80, no sparkline, for dense grids (portfolio page)
-- `MetricCardDetail` — 100% width, includes delta vs previous period AND previous year, plus source-disagreement gap chip
+- `MetricCardDetail` — 100% width, includes delta vs previous period AND previous year, plus source-comparison chip (shows gap between primary source and Store baseline on demand)
 
 **States:**
 
-- Loading: full skeleton shimmer of card shape, including 6 greyed badge placeholders.
+- Loading: full skeleton shimmer of card shape.
 - Empty (no data in range): muted, `—` as value, subtitle "No orders in range".
-- Source unavailable: that badge greyed with tooltip "Facebook Ads not connected".
+- Source unavailable: subdued "N/A" with tooltip "Facebook Ads not connected".
 - **Custom date**: when card's date range diverges from page-global, a blue-tinted chip in top-left reads `Card range: Last 7d`. Click → resets to global range. Loud because divergent dates are the #1 "why don't numbers match" support ticket ([Peel](competitors/peel-insights.md)).
 - **Low confidence**: when sample size below threshold (§5.27 ConfidenceChip), metric greyed 20%, delta suppressed, sparkline desaturated, chip reads `Based on N orders — low confidence`.
 
@@ -398,21 +446,23 @@ Bottom-right corner. 5-second auto-dismiss. Undo button on destructive actions (
 
 Container primitive. Fixed 2/3/4/6 column grids. Responsive: 4→2 at <768px, 6→3 at <1024px. Used on Dashboard and per-entity pages.
 
-### 5.14 TrustBar (Nexstage-specific, Nexstage-owned)
+### 5.14 TrustBar (occasional inline component)
 
-The thesis-expressing component. A horizontal strip showing:
+A contextual horizontal strip showing per-source counts and deltas — used on the `/attribution` page and optionally on `/dashboard` in a collapsed/secondary position. Not a "signature" thesis component; do not place on every page.
 
 ```
   Store: 1,249 orders  |  Facebook: 1,198 (−51)  |  Google: 1,221 (−28)  |  Real: 1,249  |  Not Tracked: +0
 ```
 
-Each cell is an entity with count + delta from Store baseline. "Not Tracked" shown as signed value. Click any source → drill into "Which orders are missing from Facebook?". Lives on Dashboard and Attribution pages.
+Each cell shows count + delta from Store baseline. "Not Tracked" shown as signed value. Click any source → drill into "Which orders are missing from Facebook?".
 
-**ToggleGroup** at bar top: `Orders / Revenue` — switches cell format. Default = Orders (the simplest disagreement to explain). Revenue shows the same structure as currency values per source with delta vs Store. URL-stateful (`?trust=revenue`).
+**ToggleGroup** at bar top: `Orders / Revenue` — switches cell format. Default = Orders. URL-stateful (`?trust=revenue`).
+
+**Placement rule:** TrustBar belongs on pages where source comparison is the explicit purpose (Attribution). On Dashboard, it is an optional secondary section, not above-the-fold hero content. Do not place TrustBar on Ads, Products, Profit, Orders, SEO, or any other page.
 
 ### 5.15 BreakdownSelector
 
-Dropdown in TopBar. Groups the entire page's charts and tables by a single dimension.
+Dropdown in the page content area (placed near the section it affects — typically above a DataTable or chart). Groups the section's charts and tables by a single dimension.
 
 **Canonical dimension set**: `None` (default) · `Country` · `Channel` · `Campaign` · `Ad set` · `Ad` · `Product` · `Device` · `Customer segment` · `Platform` · `Search Appearance` · `Page`.
 
@@ -443,7 +493,7 @@ Behavior:
 
 ### 5.16 ProfitMode toggle
 
-Small switch in TopBar next to BreakdownSelector, labeled **"Revenue / Profit"**. When flipped to Profit:
+Small switch in the page content area (e.g., near KpiGrid toolbar or section header), labeled **"Revenue / Profit"**. When flipped to Profit:
 
 - Every revenue-flavored MetricCard on the page swaps to its profit equivalent (see 5.1 step 6).
 - Every chart showing revenue swaps to profit.
@@ -482,9 +532,9 @@ Any filter + group + sort + columns + date-range combination on a list/breakdown
 
 Pattern source: [Stripe](competitors/_inspiration_stripe.md), [Linear](competitors/_inspiration_linear.md), [Metorik](competitors/metorik.md).
 
-### 5.20 FreshnessIndicator
+### 5.20 SyncHealthIndicator (formerly FreshnessIndicator)
 
-Top-right of every data page, between UserMenu and NotificationsBell. Shows relative time:
+Lives in the TopBar right zone. Shows relative time of last successful data sync:
 
 - `● Live` (< 2 min, pulsing green)
 - `Updated 3 min ago` (< 1h, neutral)
@@ -563,9 +613,9 @@ Used on Dashboard (always-on) and as a sidebar widget on Orders during BFCM / la
 
 Pattern source: [Stripe](competitors/_inspiration_stripe.md) "Today so far", [Shopify Native](competitors/shopify-native.md) Live View.
 
-### 5.26 AccountingModeSelector (global, TopBar)
+### 5.26 AccountingModeSelector (in-page)
 
-Sits in TopBar center, right of WindowSelector. Pill toggle: `Cash Snapshot / Accrual Performance`.
+Sits in page content, near the primary KPI area or chart toolbar. Pill toggle: `Cash Snapshot / Accrual Performance`.
 
 - **Cash Snapshot** — revenue counts on order date; spend counts on spend date. Reporting/budgeting-aligned (matches Shopify's P&L).
 - **Accrual Performance** — revenue attributes back to the click/impression date that drove it; spend stays on spend date. Media-buying-aligned (matches ad platforms).
@@ -700,7 +750,7 @@ Used by `/integrations` (connector cards are `Entity` instances), `/settings/tea
 | Convention | Rule |
 |---|---|
 | URL state | Every filter, date range, active source, sort, pagination is in the URL. No client-only state survives a refresh. |
-| Filter propagation | TopBar global filters apply to every MetricCard, chart, and table on the page unless a per-card override is set (rendered as subtle chip). |
+| Filter propagation | Page-level filters (attribution model, source, breakdown, accounting mode, profit mode) are placed in content and apply to the section they are adjacent to. DateRangePicker in TopBar is the only truly global filter. Per-card date override rendered as subtle chip. |
 | Click metric body | Navigate to pre-filtered table on relevant page. |
 | Click source badge | Switch active source without navigation. |
 | Click chart point/bar | Drill into filtered table showing that segment. |
@@ -747,30 +797,32 @@ Never use browser-native `confirm()` dialogs. Pattern source: [Linear](competito
 
 ## 7. Attribution model behavior (load-bearing)
 
-The thesis requires careful, consistent behavior across every page that shows revenue.
+Six-source attribution math runs under the hood on every page that shows revenue. The UI does not editorialize about disagreement by default — comparison is available on demand.
 
-### 7.0.1 Global selector stack
+### 7.0.1 Page-level selector stack
 
-The global selectors compose — they are not independent. Display order in TopBar (left→right):
+Attribution controls live in page content, not in the TopBar. Each page that exposes these controls places them contextually next to the section they affect. The selectors still compose and are all URL-stateful.
+
+Canonical controls (placed in-page per each page's spec):
 
 `AttributionModelSelector · WindowSelector · AccountingModeSelector · SourceToggle · BreakdownSelector · ProfitMode`
 
-All URL-stateful. All propagate to every card, chart, table on the page. Per-card override allowed but rendered as subdued chip (see §5.1 Custom date state). Changing any of them triggers a Klaviyo-style retroactive recalc with a brief `"Recomputing…"` banner.
+Per-card override is allowed but rendered as subdued chip (see §5.1 Custom date state). Changing any of them triggers a Klaviyo-style retroactive recalc with a brief `"Recomputing…"` banner.
 
-### Global selectors (TopBar)
+### Page-level selectors (in-content, not TopBar)
 
 - **AttributionModelSelector**: First-touch · Last-touch · Last-non-direct · Linear · Data-driven.
 - **WindowSelector**: 1d · 7d · 28d · LTV.
 - **AccountingModeSelector**: Cash Snapshot · Accrual Performance. (See §5.26.)
-- **SourceToggle**: multi-select of the 6 sources, defaults to `[Real]`.
+- **SourceToggle**: multi-select of the 6 sources (Real, Store, Facebook, Google, GSC, GA4), defaults to `[Real]`. Placed next to the section it filters; not global chrome.
 
-All are URL-stateful and propagate to every metric on the page.
+All are URL-stateful and affect every metric in their section scope.
 
-### Source-disagreement surfacing
+### Source comparison surfacing
 
-- MetricCard always shows the SourceBadge row, even when only Real is active (dimmer when not active).
-- Hover on a non-Real source shows: "Facebook reports $45,200 — differs from Store by +$2,100 (+4.9%)".
-- TrustBar on Dashboard and Attribution shows the row of platform-by-platform counts with deltas.
+- MetricCard default: single value, best source auto-picked. No always-visible badge row.
+- "Compare sources" popover (§5.1): on demand, shows all 6 source values with deltas vs Store baseline.
+- TrustBar (§5.14): only on Attribution page (primary) and optionally on Dashboard (secondary). Not on other pages.
 
 ### "Not Tracked"
 
@@ -783,7 +835,7 @@ All are URL-stateful and propagate to every metric on the page.
 
 - Default attribution model: Last-non-direct click. (Most pragmatic for SMBs.)
 - Default window: 7d click / 1d view. (Matches Meta default; avoids complaints.)
-- Default source: Real.
+- Default active source (auto-picked): Real when computable, Store as baseline fallback.
 - Default ProfitMode: Off (revenue view).
 - Default Breakdown: None.
 - All defaults overridable per-workspace in Settings.
@@ -825,8 +877,8 @@ Three tiers of mobile support. Per-page spec must declare which tier it targets.
 | Tier | Works on | Pages / surfaces |
 |---|---|---|
 | Mobile-first | 375×812 upward | `/dashboard`, `/orders`, `/alerts` (notifications) |
-| Mobile-usable | 768×1024 upward | `/ads` (lists + Creative Gallery 2-col), `/seo`, `/products`, `/profit` (KPI + Waterfall; P&L table horizontal-scrolls), `/customers` (Segments + LTV tabs; CohortHeatmap blocked <1280px), `/integrations`, `/settings/workspace|team|billing|notifications|targets` |
-| Desktop-only | 1280×800 upward | `/attribution` (Source Disagreement Matrix, Model Comparison, Attribution Time Machine), `/customers` Retention's `CohortHeatmap`, `/settings/costs` (inline-editable tables), `QuadrantChart`, `DaypartHeatmap`, custom report builder (v2) |
+| Mobile-usable | 768×1024 upward | `/ads` (lists + Creative Gallery 2-col), `/seo`, `/products`, `/profit` (KPI + Waterfall; P&L table horizontal-scrolls), `/customers` (Segments + LTV tabs; CohortHeatmap blocked <1280px), `/integrations`, `/settings/workspace|team|billing|notifications|targets`, `/inventory` (stock table + prediction list) |
+| Desktop-only | 1280×800 upward | `/attribution` (Source Comparison Matrix, Model Comparison, Attribution Time Machine), `/performance` (CrUX table + Lighthouse breakdown), `/customers` Retention's `CohortHeatmap`, `/settings/costs` (inline-editable tables), `QuadrantChart`, `DaypartHeatmap`, custom report builder (v2) |
 
 Breakpoints: `sm: 640px`, `md: 768px`, `lg: 1024px`, `xl: 1280px` (Tailwind defaults).
 
@@ -893,10 +945,13 @@ Keyboard shortcuts (global):
 | g d | Go to Dashboard |
 | g o | Go to Orders |
 | g a | Go to Ads |
+| g t | Go to Attribution |
 | g s | Go to SEO |
+| g e | Go to Performance |
 | g p | Go to Products |
-| g c | Go to Customers |
 | g f | Go to Profit (finance) |
+| g c | Go to Customers |
+| g n | Go to Inventory |
 | g i | Go to Integrations |
 
 ---
@@ -947,12 +1002,11 @@ Table: Source (from §4 colors) · Required? · API / DB provenance · Freshness
 ## Above the fold (1440×900)
 Component tree using names from §5. Example:
 - KpiGrid (4 cols)
-  - MetricCard "Revenue (28d)" · sources=[Real, Store]
-  - MetricCard "Orders" · sources=[Real, Store]
-  - MetricCard "Not Tracked" · sources=[computed]
-  - MetricCard "Ad Spend" · sources=[Facebook, Google]
-- TrustBar (see UX.md §5.14)
-- LineChart "Revenue over time" · multi-source overlay
+  - MetricCard "Revenue (28d)" · auto-source=Real · compare-sources-popover
+  - MetricCard "Orders" · auto-source=Store
+  - MetricCard "Ad Spend" · auto-source=blended
+  - MetricCard "ROAS (7d)" · auto-source=Real
+- LineChart "Revenue over time" · single primary source line by default
 
 ## Below the fold
 Same tree format.

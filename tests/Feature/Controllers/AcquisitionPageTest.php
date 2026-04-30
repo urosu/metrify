@@ -4,12 +4,10 @@ declare(strict_types=1);
 
 namespace Tests\Feature\Controllers;
 
-use App\Models\Store;
 use App\Models\User;
-use App\Models\Workspace;
-use App\Models\WorkspaceUser;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use Tests\Concerns\WithOnboardedWorkspace;
 use Tests\TestCase;
 
 /**
@@ -27,27 +25,12 @@ use Tests\TestCase;
 class AcquisitionPageTest extends TestCase
 {
     use RefreshDatabase;
-
-    private User $user;
-    private Workspace $workspace;
-    private Store $store;
+    use WithOnboardedWorkspace;
 
     protected function setUp(): void
     {
         parent::setUp();
-
-        $this->user      = User::factory()->create();
-        $this->workspace = Workspace::factory()->create(['owner_id' => $this->user->id]);
-
-        WorkspaceUser::factory()->owner()->create([
-            'user_id'      => $this->user->id,
-            'workspace_id' => $this->workspace->id,
-        ]);
-
-        $this->store = Store::factory()->create([
-            'workspace_id'             => $this->workspace->id,
-            'historical_import_status' => 'completed',
-        ]);
+        $this->setUpOnboardedWorkspace();
     }
 
     private function visit(array $params = []): \Illuminate\Testing\TestResponse

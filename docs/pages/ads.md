@@ -22,8 +22,8 @@ One place to rank campaigns, adsets, ads, and creatives across Facebook and Goog
 | Facebook (indigo-500) | Yes | `ad_insights` + `campaigns` joined to `attribution_*` on orders | ~15 min (Insights API v21.0+; see RESEARCH) |
 | Google Ads (amber-500) | Yes | `ad_insights` (Google), `gclid` on orders | ~30 min (GAQL daily + intraday) |
 | Store (slate-500) | Yes | `orders` (authoritative denominator for Real ROAS) | <2 min (webhook) |
-| Site (violet-500) | No | First-party session pixel (future) | n/a in v1 |
-| Real (yellow-400) | Yes — computed | `RevenueAttributionService` output joined to spend | Derivative of above |
+| GA4 (violet-500) | No | GA4 event data (future connector) | n/a in v1 |
+| Real (zinc-500) | Yes — computed | `RevenueAttributionService` output joined to spend | Derivative of above |
 | GSC (emerald-500) | No | Not shown on this page (see `/seo`) | n/a |
 
 Country spend uses `COALESCE(campaigns.parsed_convention->>'country', stores.primary_country_code, 'UNKNOWN')` — there is no country column on `ad_insights`.
@@ -34,7 +34,7 @@ Country spend uses `COALESCE(campaigns.parsed_convention->>'country', stores.pri
 - FilterChipSentence — pinned under TopBar: `Showing ads from Last 30d where Platform is Facebook, Google and Status is Active`
 - KpiGrid (6 cols)
   - MetricCard "Total Ad Spend" · sources=[Facebook, Google, Real] — dictionary "Our pick"
-  - MetricCard "Blended ROAS (7d click)" · sources=[Facebook, Google, Real] — headline gold-lightbulb on Real. Label flips to `Purchase ROAS · Facebook` when Facebook badge is active (platform-native metric name — prevents apples/pears comparison)
+  - MetricCard "Blended ROAS (7d click)" · auto-source=Real · compare-sources popover shows Facebook and Google. Label contextualizes source when compare-sources popover is open: `Purchase ROAS · Facebook` (platform-native metric name — prevents apples/pears comparison)
   - MetricCard "CAC (1st Time)" · sources=[Facebook, Google, Real]
   - MetricCard "Purchases vs Orders" · sources=[Facebook, Google, Store] — source-conditional label flip per metric dictionary §Ads "Purchases (platform-attributed) vs Orders (store-recorded) — always distinct, never averaged": when Store badge is active, label = `Orders`; when Facebook or Google badge active, label = `Purchases`
   - MetricCard "Not Tracked" · sources=[computed] — signed; negative = platforms over-report
@@ -54,7 +54,7 @@ Country spend uses `COALESCE(campaigns.parsed_convention->>'country', stores.pri
 
 ## Below the fold
 
-- LineChart "Spend vs Real Revenue over time" · multi-source overlay (Facebook-indigo / Google-amber / Real-yellow) · GranularitySelector (default Daily for ≤14d ranges)
+- LineChart "Spend vs Real Revenue over time" · primary lines: Real (zinc), Facebook (indigo), Google (amber) · GranularitySelector (default Daily for ≤14d ranges)
   - TargetLine (§5.23) dashed at workspace ROAS target, labeled at right edge
   - ChartAnnotationLayer (§5.6.1) shows token-expiry events, budget changes, workspace annotations
   - Dotted tail on the rightmost incomplete period ("Partial — range closes in 6h")

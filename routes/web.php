@@ -2,22 +2,17 @@
 
 use App\Http\Controllers\AdminController;
 use App\Http\Controllers\BillingController;
-use App\Http\Controllers\AdSetsController;
+use App\Http\Controllers\ProductsController;
 use App\Http\Controllers\AdsController;
-use App\Http\Controllers\CampaignsController;
+use App\Http\Controllers\CreativeGalleryController;
 use App\Http\Controllers\SeoController;
-use App\Http\Controllers\AcquisitionController;
-use App\Http\Controllers\AnalyticsController;
-use App\Http\Controllers\CountriesController;
 use App\Http\Controllers\StorePageController;
-use App\Http\Controllers\DiscrepancyController;
-use App\Http\Controllers\WinnersLosersController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\FacebookOAuthController;
+use App\Http\Controllers\Ga4OAuthController;
 use App\Http\Controllers\GoogleOAuthController;
 use App\Http\Controllers\ShopifyOAuthController;
 use App\Http\Controllers\ImportStatusController;
-use App\Http\Controllers\InboxController;
 use App\Http\Controllers\ManageController;
 use App\Http\Controllers\IntegrationsController;
 use App\Http\Controllers\OnboardingController;
@@ -31,9 +26,15 @@ use App\Http\Controllers\WorkspaceSettingsController;
 use App\Http\Controllers\WorkspaceController;
 use App\Http\Controllers\WorkspaceSwitchController;
 use App\Http\Controllers\WorkspaceEventsController;
-use App\Http\Controllers\HolidaysController;
 use App\Http\Controllers\NotificationPreferencesController;
 use App\Http\Controllers\WorkspaceTeamController;
+use App\Http\Controllers\ProfitController;
+use App\Http\Controllers\AuditLogController;
+use App\Http\Controllers\HolidaysController;
+use App\Http\Controllers\InventoryController;
+use App\Http\Controllers\Tools\ShippingAnalysisController;
+use App\Http\Controllers\JournalController;
+use App\Http\Controllers\UserFlowController;
 use Illuminate\Support\Facades\Route;
 use Inertia\Inertia;
 
@@ -66,6 +67,15 @@ Route::get('/invitations/{token}', [WorkspaceInvitationController::class, 'show'
 require __DIR__.'/auth.php';
 
 // ---------------------------------------------------------------------------
+// Public pixel ingestion — unauthenticated, token-authed at controller level.
+// ---------------------------------------------------------------------------
+Route::options('/pixel/{workspace:slug}/event', [\App\Http\Controllers\PixelEventController::class, 'preflight'])
+    ->name('pixel.event.preflight');
+Route::post('/pixel/{workspace:slug}/event', [\App\Http\Controllers\PixelEventController::class, 'store'])
+    ->name('pixel.event.store')
+    ->withoutMiddleware([\Illuminate\Foundation\Http\Middleware\VerifyCsrfToken::class]);
+
+// ---------------------------------------------------------------------------
 // Authenticated routes
 // ---------------------------------------------------------------------------
 
@@ -74,8 +84,10 @@ Route::middleware('auth')->group(function (): void {
     // Onboarding — SetActiveWorkspace skips 'onboarding/*' paths
     Route::middleware('verified')->group(function (): void {
         Route::get('/onboarding', [OnboardingController::class, 'show'])->name('onboarding');
+        Route::post('/onboarding/workspace', [OnboardingController::class, 'saveWorkspace'])->name('onboarding.workspace');
         Route::post('/onboarding/store', [OnboardingController::class, 'connectStore'])->name('onboarding.store');
         Route::post('/onboarding/country', [OnboardingController::class, 'saveCountry'])->name('onboarding.country');
+        Route::post('/onboarding/costs', [OnboardingController::class, 'saveCosts'])->name('onboarding.costs');
         Route::post('/onboarding/import', [OnboardingController::class, 'startImport'])->name('onboarding.import');
         Route::post('/onboarding/import/reset', [OnboardingController::class, 'resetImport'])->name('onboarding.import.reset');
         Route::post('/onboarding/reset', [OnboardingController::class, 'resetOnboarding'])->name('onboarding.reset');
@@ -132,79 +144,78 @@ Route::middleware('auth')->group(function (): void {
         Route::post('/dashboard/dismiss-not-tracked-banner', [DashboardController::class, 'dismissNotTrackedBanner'])
             ->name('dashboard.dismiss-not-tracked-banner');
 
+        // Customers (segments / RFM / retention / LTV)
+        Route::get('/customers', \App\Http\Controllers\CustomersController::class)->name('customers.index');
+
+        // Forecast — JSON endpoint used by Dashboard's revenue chart toggle
+        Route::get('/api/forecast', \App\Http\Controllers\ForecastController::class)->name('dashboard.forecast');
+
         // Store — unified 5-tab destination (Phase 3.2)
         Route::get('/store', StorePageController::class)->name('store');
 
-        // Countries — redirected to Store › Countries tab (Phase 3.8 IA cleanup)
-        Route::get('/countries', function () {
-            return redirect('/' . request()->segment(1) . '/store?tab=countries', 301);
-        })->name('countries');
 
-        // Acquisition — flagship Phase 1.6 page (channel-level attribution)
-        Route::get('/acquisition', AcquisitionController::class)->name('acquisition');
-
-        // Analytics sub-pages — Phase 3.8: old standalone pages redirect to new IA destinations.
-        // Product detail kept for PDF deep-links (monthly reports link to individual products).
-        Route::get('/analytics/products', function () {
-            return redirect('/' . request()->segment(1) . '/store?tab=products', 301);
-        })->name('analytics.products');
-        Route::get('/analytics/products/{product}', [AnalyticsController::class, 'productShow'])->name('analytics.products.show');
-        Route::get('/analytics/daily', function () {
-            return redirect('/' . request()->segment(1) . '/store?tab=orders', 301);
-        })->name('analytics.daily');
-        Route::get('/analytics/discrepancy', function () {
-            return redirect('/' . request()->segment(1) . '/acquisition?tab=platform-vs-real', 301);
-        })->name('analytics.discrepancy');
-        Route::get('/analytics/winners', function () {
-            return redirect('/' . request()->segment(1) . '/store?tab=products', 301);
-        })->name('analytics.winners');
-        Route::post('/analytics/notes/{date}', [AnalyticsController::class, 'upsertNote'])
-            ->where('date', '\d{4}-\d{2}-\d{2}')
-            ->name('analytics.notes.upsert');
-
+        // Orders list — per-order ground truth with six-source attribution
+        Route::get('/orders', [OrdersController::class, 'index'])->name('orders.index');
         // Order detail — attribution journey for a single order
         Route::get('/orders/{order}', [OrdersController::class, 'show'])->name('orders.show');
 
-        // Inbox (Phase 4.2) — unified feed: Today's Attention, Recommendations,
-        // alerts/summaries/notes via InboxItem polymorphic wrapper, monthly PDFs.
-        Route::get('/inbox', [InboxController::class, 'index'])->name('inbox');
-        Route::post('/inbox/items/{item}/snooze', [InboxController::class, 'snooze'])->name('inbox.items.snooze');
-        Route::post('/inbox/items/{item}/done', [InboxController::class, 'markDone'])->name('inbox.items.done');
-        Route::post('/inbox/items/{item}/dismiss', [InboxController::class, 'dismiss'])->name('inbox.items.dismiss');
-        Route::post('/inbox/recommendations/{recommendation}/snooze', [InboxController::class, 'snoozeRecommendation'])->name('inbox.recommendations.snooze');
-        Route::post('/inbox/recommendations/{recommendation}/done', [InboxController::class, 'markRecommendationDone'])->name('inbox.recommendations.done');
-        Route::post('/inbox/recommendations/{recommendation}/dismiss', [InboxController::class, 'dismissRecommendation'])->name('inbox.recommendations.dismiss');
-        Route::get('/inbox/monthly-report/{year}/{month}', [InboxController::class, 'downloadMonthlyReport'])
-            ->where(['year' => '\d{4}', 'month' => '\d{1,2}'])
-            ->name('inbox.monthly-report');
 
-        // Legacy /insights → /inbox redirects (preserve old bookmarks and email links).
-        Route::get('/insights', function (\App\Models\Workspace $workspace) {
-            return redirect("/{$workspace->slug}/inbox");
-        });
-        Route::get('/insights/monthly-report/{year}/{month}', function (\App\Models\Workspace $workspace, int $year, int $month) {
-            return redirect("/{$workspace->slug}/inbox/monthly-report/{$year}/{$month}");
-        })->where(['year' => '\d{4}', 'month' => '\d{1,2}']);
+        // Ads — unified Northbeam-style page: campaigns / adsets / ads / creatives via tab.
+        // Replaces legacy /campaigns, /campaigns/adsets, /campaigns/ads routes.
+        Route::get('/ads', AdsController::class)->name('ads.index');
 
-        // Campaigns — unified level-toggle page (Phase 4.1).
-        // Legacy sub-routes redirect to the level param so old bookmarks / links keep working.
-        Route::get('/campaigns', CampaignsController::class)->name('campaigns.index');
-        Route::get('/campaigns/adsets', function (\Illuminate\Http\Request $req, \App\Models\Workspace $workspace) {
-            $qs = http_build_query(array_merge($req->query(), ['level' => 'adset']));
-            return redirect("/{$workspace->slug}/campaigns?{$qs}");
-        })->name('campaigns.adsets');
-        Route::get('/campaigns/ads', function (\Illuminate\Http\Request $req, \App\Models\Workspace $workspace) {
-            $qs = http_build_query(array_merge($req->query(), ['level' => 'ad']));
-            return redirect("/{$workspace->slug}/campaigns?{$qs}");
-        })->name('campaigns.ads');
+        // Creative Gallery — best creatives deep view with trophy strip, gallery/list views,
+        // format/grade filters, and Klaviyo top-performers section.
+        // @see docs/pages/ads.md §Creative Gallery view
+        Route::get('/ads/creatives', CreativeGalleryController::class)->name('ads.creatives');
+
         Route::get('/seo', SeoController::class)->name('seo.index');
+
+        // Profit & Loss — net revenue, COGS, fees, ad spend, contribution margin, OPEX → net profit
+        Route::get('/profit', ProfitController::class)->name('profit.index');
+
+        // Products — per-SKU revenue, margin, COGS editor, LTV correlation
+        Route::get('/products', [ProductsController::class, 'index'])->name('products.index');
+        Route::patch('/products/{product}/cogs', [ProductsController::class, 'updateCogs'])->name('products.cogs.update');
+
+        // Attribution — thesis page, source disagreement surfaced (see docs/pages/attribution.md)
+        Route::get('/attribution', \App\Http\Controllers\AttributionController::class)->name('attribution.index');
+
+        // User Flow Funnel — 5-step acquisition funnel (landing → product → cart → checkout → purchase)
+        // with per-channel split and per-product drill. See docs/competitors/_research_user_flow_funnel.md
+        Route::get('/flow', UserFlowController::class)->name('flow.index');
+
         Route::get('/performance', \App\Http\Controllers\PerformanceController::class)->name('performance.index');
 
-        // Manage — tools for improving data quality (UTM tag generator, etc.)
-        // See: PLANNING.md "UTM Coverage Health Check + Tag Generator"
-        Route::get('/manage/tag-generator', [ManageController::class, 'tagGenerator'])->name('manage.tag-generator');
-        Route::get('/manage/naming-convention', [ManageController::class, 'namingConvention'])->name('manage.naming-convention');
-        Route::get('/manage/channel-mappings', [ManageController::class, 'channelMappings'])->name('manage.channel-mappings');
+        // Tools — sidebar Tools group (Wave 3A-2). Canonical home for UTM tools.
+        Route::prefix('tools')->name('tools.')->group(function (): void {
+            Route::get('/tag-generator', \App\Http\Controllers\Tools\TagGeneratorController::class)
+                ->name('tag-generator');
+
+            Route::get('/naming-convention', \App\Http\Controllers\Tools\NamingConventionController::class)
+                ->name('naming-convention');
+
+            Route::get('/channel-mappings', [\App\Http\Controllers\Tools\ChannelMappingsController::class, '__invoke'])
+                ->name('channel-mappings');
+            Route::post('/channel-mappings', [\App\Http\Controllers\Tools\ChannelMappingsController::class, 'store'])
+                ->name('channel-mappings.store');
+            // import-defaults must come before {channelMapping} to avoid route binding conflict
+            Route::post('/channel-mappings/import-defaults', [\App\Http\Controllers\Tools\ChannelMappingsController::class, 'importDefaults'])
+                ->name('channel-mappings.import-defaults');
+            Route::put('/channel-mappings/{channelMapping}', [\App\Http\Controllers\Tools\ChannelMappingsController::class, 'update'])
+                ->name('channel-mappings.update');
+            Route::delete('/channel-mappings/{channelMapping}', [\App\Http\Controllers\Tools\ChannelMappingsController::class, 'destroy'])
+                ->name('channel-mappings.destroy');
+        });
+
+        // Manage — old tool GET routes redirect to /tools/* (backward-compat, 301)
+        Route::get('/manage/tag-generator', fn () => redirect('/' . request()->segment(1) . '/tools/tag-generator', 301))
+            ->name('manage.tag-generator');
+        Route::get('/manage/naming-convention', fn () => redirect('/' . request()->segment(1) . '/tools/naming-convention', 301))
+            ->name('manage.naming-convention');
+        Route::get('/manage/channel-mappings', fn () => redirect('/' . request()->segment(1) . '/tools/channel-mappings', 301))
+            ->name('manage.channel-mappings');
+        // Non-GET manage/channel-mapping mutations kept on ManageController for backward-compat
         Route::post('/manage/channel-mappings', [ManageController::class, 'storeChannelMapping'])->name('manage.channel-mappings.store');
         Route::post('/manage/channel-mappings/import-defaults', [ManageController::class, 'importChannelMappingDefaults'])->name('manage.channel-mappings.import-defaults');
         Route::put('/manage/channel-mappings/{channelMapping}', [ManageController::class, 'updateChannelMapping'])->name('manage.channel-mappings.update');
@@ -220,11 +231,29 @@ Route::middleware('auth')->group(function (): void {
         Route::put('/manage/product-costs/{productCost}', [ManageController::class, 'updateProductCost'])->name('manage.product-costs.update');
         Route::delete('/manage/product-costs/{productCost}', [ManageController::class, 'destroyProductCost'])->name('manage.product-costs.destroy');
 
-        // Holidays — reference calendar per workspace country
-        Route::get('/holidays', [HolidaysController::class, 'index'])->name('holidays.index');
+        // Integrations — top-level tracking health + connection overview (UX §2 route 9)
+        // Distinct from /{workspace}/settings/integrations (OAuth connect/disconnect flow).
+        Route::get('/integrations', [IntegrationsController::class, 'index'])->name('integrations.index');
 
-        // Help pages — static content
-        Route::get('/help/data-accuracy', fn () => Inertia::render('Help/DataAccuracy'))->name('help.data-accuracy');
+        // Holidays & sale events — campaign planning tool (Wave 3A-2 Tools group)
+        // Canonical path is /tools/holidays; /holidays kept for backward-compat (301)
+        Route::get('/tools/holidays', [HolidaysController::class, 'index'])->name('tools.holidays');
+        Route::get('/holidays', fn () => redirect('/' . request()->segment(1) . '/tools/holidays', 301))
+            ->name('holidays.index');
+
+        // Shipping cost analysis by country — carrier cost vs charged, return rate, COD, what-if simulator
+        Route::get('/tools/shipping-analysis', ShippingAnalysisController::class)->name('tools.shipping-analysis');
+
+        // Daily journal — monthly day-grain KPI log + activity annotations
+        // GET  /{workspace}/journal?month=YYYY-MM
+        // POST /{workspace}/journal/notes  — mock note save (real DB in L3)
+        Route::get('/journal', [JournalController::class, 'index'])->name('journal.index');
+        Route::post('/journal/notes', [JournalController::class, 'storeNote'])->name('journal.notes.store');
+        Route::delete('/journal/notes/{noteId}', [JournalController::class, 'destroyNote'])->name('journal.notes.destroy');
+
+        // Inventory — stock health, sales prediction, reorder signals
+        Route::get('/inventory', [InventoryController::class, 'index'])->name('inventory.index');
+
 
         // Stores
         Route::get('/stores', [StoreController::class, 'index'])->name('stores.index');
@@ -264,6 +293,10 @@ Route::middleware('auth')->group(function (): void {
             ->name('api.stores.import-status');
 
         // Settings
+        Route::get('/settings', function () {
+            return redirect('/' . request()->segment(1) . '/settings/workspace', 302);
+        })->name('settings');
+
         Route::prefix('settings')->name('settings.')->group(function (): void {
 
             // Profile settings
@@ -324,6 +357,9 @@ Route::middleware('auth')->group(function (): void {
             Route::patch('/events/{eventId}', [WorkspaceEventsController::class, 'update'])->name('events.update');
             Route::delete('/events/{eventId}', [WorkspaceEventsController::class, 'destroy'])->name('events.destroy');
 
+            // Audit log
+            Route::get('/audit', [AuditLogController::class, 'index'])->name('audit');
+
             // Billing
             Route::get('/billing', [BillingController::class, 'show'])->name('billing');
             Route::post('/billing/subscribe', [BillingController::class, 'subscribe'])->name('billing.subscribe');
@@ -356,12 +392,21 @@ Route::middleware(['auth', 'throttle:10,1'])->prefix('oauth')->name('oauth.')->g
     Route::get('/google/gsc', [GoogleOAuthController::class, 'redirectGsc'])->name('google.gsc.redirect');
     Route::post('/google/ads/connect', [GoogleOAuthController::class, 'connectGoogleAdsAccounts'])->name('google.ads.connect');
     Route::post('/gsc/connect', [GoogleOAuthController::class, 'connectGscProperty'])->name('gsc.connect');
+
+    // GA4 — initiate, property selection (GET + POST), disconnect
+    // Initiate URL (/oauth/ga4/initiate) is what the /integrations card links to.
+    // The callback has no auth middleware (handled below) — consistent with other OAuth callbacks.
+    Route::get('/ga4/initiate', [Ga4OAuthController::class, 'initiate'])->name('ga4.initiate');
+    Route::get('/ga4/select-property', [Ga4OAuthController::class, 'selectProperty'])->name('ga4.select-property');
+    Route::post('/ga4/select-property', [Ga4OAuthController::class, 'persistProperty'])->name('ga4.persist-property');
+    Route::post('/ga4/disconnect', [Ga4OAuthController::class, 'disconnect'])->name('ga4.disconnect');
 });
 
 // OAuth callbacks — no auth middleware; HMAC-signed state verifies integrity.
 Route::middleware(['throttle:10,1'])->prefix('oauth')->name('oauth.')->group(function (): void {
     Route::get('/facebook/callback', [FacebookOAuthController::class, 'callback'])->name('facebook.callback');
     Route::get('/google/callback',   [GoogleOAuthController::class, 'callback'])->name('google.callback');
+    Route::get('/ga4/callback',      [Ga4OAuthController::class, 'callback'])->name('ga4.callback');
 });
 
 // ---------------------------------------------------------------------------

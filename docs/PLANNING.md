@@ -10,7 +10,7 @@ Work order for building Nexstage v1. Dependency-ordered, not phase-ordered — i
 
 1. [CLAUDE.md](../CLAUDE.md) — conventions + gotchas (multi-tenancy, JSONB pairing, snapshot-truth, FX cache).
 2. This file (`PLANNING.md`) — work order.
-3. [UX.md](UX.md) — design system (37 primitives, 10 routes, interaction rules).
+3. [UX.md](UX.md) — design system (37+ primitives, 12 work routes + tool sub-routes, interaction rules).
 4. [pages/\*.md](pages/) — one file per route. Reference only what the current task needs.
 5. [planning/schema.md](planning/schema.md) · [planning/backend.md](planning/backend.md) · [planning/frontend.md](planning/frontend.md) — target architecture. KEEP/MODIFY/NEW/DROP per item. Read the section matching the task.
 6. [competitors/\_patterns_catalog.md](competitors/_patterns_catalog.md) · [competitors/\_crosscut_metric_dictionary.md](competitors/_crosscut_metric_dictionary.md) — naming + patterns. Reference when a UX term is unclear.
@@ -21,7 +21,7 @@ Everything else in `docs/competitors/` is deep reference only.
 
 ## 1. Thesis (one paragraph)
 
-Ecommerce analytics for Shopify + WooCommerce SMBs. The product is **source disagreement, surfaced** — every revenue metric carries a six-source badge (Store · Facebook · Google · GSC · Site · Real), "Not Tracked" is a first-class bucket that can go negative, and no platform gets to claim "the truth". MVP connectors: WC, Shopify, Facebook Ads, Google Ads, GSC. No GA4. Pricing: €39/mo + 0.4% revenue share — uncontested in the market.
+Ecommerce analytics for Shopify + WooCommerce SMBs. Clean metrics, accurate attribution under the hood, source comparison available on demand — like Shopify, Polar, and Plausible, but with six-source attribution math that goes deeper. Show one good number per metric (best source auto-picked); let merchants drill into source comparison when they need it, not by default. MVP connectors: Shopify, WooCommerce, Facebook Ads, Google Ads, GSC, GA4. Pricing: €39/mo + 0.4% revenue share — uncontested in the market.
 
 ---
 
@@ -88,8 +88,8 @@ Build phases are strict; later phases depend on earlier ones. Detail in [fronten
 | P1 — atoms | `SourceBadge`, `StatusDot`, `Sparkline`, `Skeleton`, `Entity`, Tailwind tokens for 6 source colors |
 | P2 — molecules | `MetricCard` (+ Portfolio/MultiValue/Compact/Detail variants), `KpiGrid`, `DateRangePicker`, `FilterChipSentence`, `ConfidenceChip`, `SignalTypeBadge`, `LetterGradeBadge`, `StatStripe`, `TouchpointString` |
 | P3 — organisms | `DataTable` + `InlineEditableCell`, chart primitives (`LineChart`, `BarChart`, `CohortHeatmap`, `DaypartHeatmap`, `FunnelChart`, `QuadrantChart`, `LayerCakeChart`, `ProfitWaterfallChart`), `EmptyState`, `LoadingState`, `AlertBanner` + `DemoBanner`, `Toast`, `DrawerSidePanel`, `SavedView`, `SubNavTabs`, `ViewToggle` |
-| P4 — global chrome | TopBar filter stack (`AttributionModelSelector`, `WindowSelector`, `AccountingModeSelector`, `SourceToggle`, `BreakdownSelector`, `ProfitModeToggle`), Sidebar, `WorkspaceSwitcher`, `CommandPalette`, `ContextMenu`, `FreshnessIndicator` |
-| P5 — thesis composites | `TrustBar` (signature), `TriageInbox`, `Target` (+TargetLine/TargetProgress), `ActivityFeed`, `TodaySoFar`, `ChartAnnotationLayer`, `EntityHoverCard`, `AudienceTraits`, `ShareSnapshotButton`, `ExportMenu`, `TabTitleStatus` |
+| P4 — global chrome | TopBar (`DateRangePicker`, `SyncHealthIndicator`), in-page filter controls (`AttributionModelSelector`, `WindowSelector`, `AccountingModeSelector`, `SourceToggle`, `BreakdownSelector`, `ProfitModeToggle`), Sidebar, `WorkspaceSwitcher`, `CommandPalette`, `ContextMenu`, `FreshnessIndicator` |
+| P5 — composites | `TrustBar` (contextual, Attribution page primarily), `TriageInbox`, `Target` (+TargetLine/TargetProgress), `ActivityFeed`, `TodaySoFar`, `ChartAnnotationLayer`, `EntityHoverCard`, `AudienceTraits`, `ShareSnapshotButton`, `ExportMenu`, `TabTitleStatus` |
 
 Layouts: `AppLayout` MODIFY, `SettingsLayout` NEW, `AuthLayout` KEEP, `OnboardingLayout` MODIFY, `PublicSnapshotLayout` NEW. [frontend.md §2](planning/frontend.md#2-layout-shells).
 
@@ -103,13 +103,16 @@ Order by user value + unblocks:
 | 2 | `/integrations` | [pages/integrations.md](pages/integrations.md) | Users reconnect from here; Tracking Health is our differentiation surface |
 | 3 | `/dashboard` | [pages/dashboard.md](pages/dashboard.md) | Landing route, highest traffic |
 | 4 | `/orders` | [pages/orders.md](pages/orders.md) | Core data page; populates Dashboard drawers |
-| 5 | `/attribution` | [pages/attribution.md](pages/attribution.md) | Thesis surface (TrustBar, Source Disagreement Matrix, Time Machine) |
+| 5 | `/attribution` | [pages/attribution.md](pages/attribution.md) | Source comparison matrix, Model Comparison, Attribution Time Machine |
 | 6 | `/ads` | [pages/ads.md](pages/ads.md) | Attribution-adjacent; validates ad reconciliation end-to-end |
 | 7 | `/profit` | [pages/profit.md](pages/profit.md) | Requires cost config; builds on Dashboard ProfitMode plumbing |
 | 8 | `/seo` | [pages/seo.md](pages/seo.md) | GSC is simple pipe; low risk |
 | 9 | `/products` | [pages/products.md](pages/products.md) | Inline COGS is load-bearing; cross-checks Profit page |
 | 10 | `/customers` | [pages/customers.md](pages/customers.md) | Deepest UX (RFM + 3-view cohort + LayerCake); do last |
-| 11 | `/settings/*` | [pages/settings.md](pages/settings.md) | Refined last — users don't configure before they see data |
+| 11 | `/performance` | [pages/performance.md](pages/performance.md) | CrUX + Lighthouse; standalone once GSC pipe is in place |
+| 12 | `/inventory` | [pages/inventory.md](pages/inventory.md) | Stock vs demand prediction; depends on products + snapshot data |
+| 13 | `/tools/*` | sub-routes under Tools sidebar item | TagGenerator, ChannelMappings, NamingConvention, Holidays |
+| 14 | `/settings/*` | [pages/settings.md](pages/settings.md) | Refined last — users don't configure before they see data |
 
 Page public-snapshot view (`/public/snapshot/{token}`) built alongside pages that use it.
 
@@ -122,6 +125,19 @@ Page public-snapshot view (`/public/snapshot/{token}`) built alongside pages tha
 | A11y audit pass (WCAG AA, focus rings, chart `<table>` fallback, keyboard shortcuts) | [UX §11](UX.md#11-accessibility--keyboard) |
 | Performance: attribution recompute target <5 min / 100k orders | [backend.md §11](planning/backend.md#11-attribution-pipeline) |
 | Pricing page (marketing site, not app) | [competitors/\_crosscut_pricing_ux.md](competitors/_crosscut_pricing_ux.md) |
+
+### L7 — Customer-requested features
+
+Six features named by early users. Implement after L5 pages are stable; each is additive, not load-bearing for the core analytics flow.
+
+| # | Feature | Description | Primary location |
+|---|---|---|---|
+| 1 | **Custom date range comparison** | Period vs prior-period overlay AND period vs same-period-last-year overlay. User selects both comparison modes from the DateRangePicker. Affects KpiGrid deltas, LineCharts, and DataTable delta columns. | Cross-cutting: `/dashboard`, `/orders`, `/products` primarily. `DateRangePicker` (§5.3) gains a second comparison mode toggle. |
+| 2 | **Best creatives** | Top Facebook + Google ad creatives ranked by ROAS / spend / engagement. Optionally top Klaviyo email campaigns. Surface as a dedicated tab or the existing Creative Gallery on `/ads`. | `/ads` (Creative Gallery view already spec'd). Add a "Top Creatives" saved view seeded per workspace. Klaviyo integration optional v2. |
+| 3 | **Shipping cost by country** | Table: Country · Avg shipping cost · Returns % · COD % · Suggested actions (e.g., "High returns in DE — review policy"). Data from `orders` + `shipping_rules`. | `/profit` (new "Shipping by Country" section below the waterfall) or `/tools/shipping` as a standalone tool page. Prefer folding into `/profit` to avoid route proliferation. |
+| 4 | **User flow funnel** | Landing page → Product page → Add to cart → Purchase. Breakdowns: per-channel, per-product, per-landing-page. Uses GA4 event data + `orders` attribution. | `/attribution` (new "Funnel" tab via `SubNavTabs`) or net-new `/flow` route. Decide based on GA4 connector readiness. Requires `FunnelChart` primitive (already spec'd in §5.6). |
+| 5 | **Sales prediction with stock awareness** | Forecast next month's units per product based on last month + same-period-last-year trend. Flag products where predicted demand exceeds current stock. Stock sourced from platform inventory webhooks into `product_variants.stock_quantity`. | `/inventory` (primary surface — the page exists for this). Also a chip on `/products` table rows: "Predicted stockout in 12d". |
+| 6 | **Monthly daily-grain overview with notes-as-vertical-lines** | Sheet-style grid: rows = days of month, columns = Ad Spend · Total Sales · # Packages · # Items · IPO · % in marketing · AOV · ROAS · Activities (notes). Notes render as vertical dashed lines on charts page-wide, powered by `ChartAnnotationLayer` (§5.6.1). | `/dashboard` as a "Daily Journal" tab (preferred — reuses existing primitives and snapshot data) or net-new `/journal` route. Decide during L5 Dashboard implementation. |
 
 ---
 
@@ -154,5 +170,4 @@ Explicit scope guards. Enumerated in [UX.md §2 out-of-scope](UX.md#out-of-scope
 - No custom SQL report builder (templated reports only)
 - No dark mode (v2)
 - No scheduled Slack digests (email digest v1; on-demand Slack only)
-- No Site / GA4 connector (v2)
 - No TikTok / Pinterest / Snap / Microsoft Ads (v2 — schema-ready)

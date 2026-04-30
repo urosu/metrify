@@ -99,9 +99,9 @@ export function PlatformVsRealTable({
             <div className="flex items-start gap-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3">
                 <Info className="mt-0.5 h-4 w-4 shrink-0 text-blue-600" />
                 <p className="text-sm text-blue-800">
-                    Ad platforms use modeled conversions (especially post-iOS 14.5) which often
-                    over-report revenue. The "Real" column shows store-verified {attrLabel} attributed
-                    revenue matched via UTM parameters. The delta reveals the gap.
+                    Ad platforms use modeled conversions (especially post-iOS 14.5), which may
+                    differ from store-recorded revenue. The "Real" column shows store-verified {attrLabel} attributed
+                    revenue matched via UTM parameters. The delta shows the measurement gap.
                 </p>
             </div>
 
@@ -130,7 +130,7 @@ export function PlatformVsRealTable({
                             : undefined
                     }
                     loading={loading}
-                    tooltip="Difference between platform-reported and store-attributed revenue. Positive = platform over-reports."
+                    tooltip="Difference between platform-reported and store-attributed revenue. Positive = platform reports higher than store."
                 />
                 <MetricCard
                     label="Total Ad Spend"
@@ -185,7 +185,7 @@ export function PlatformVsRealTable({
                                 axisLine={false}
                             />
                             <Tooltip
-                                contentStyle={{ backgroundColor: '#fff', border: '1px solid #e4e4e7', borderRadius: '8px', fontSize: '12px' }}
+                                contentStyle={{ backgroundColor: '#fff', border: '1px solid #e4e4e7', borderRadius: '8px', fontSize: '14px' }}
                                 formatter={(value, name) => [
                                     formatCurrency(Number(value), currency),
                                     name === 'platform_revenue' ? 'Platform Reported' : 'Store Attributed',
@@ -195,7 +195,7 @@ export function PlatformVsRealTable({
                             <Legend
                                 iconType="circle"
                                 iconSize={8}
-                                wrapperStyle={{ fontSize: '12px', paddingTop: '8px' }}
+                                wrapperStyle={{ fontSize: '14px', paddingTop: '8px' }}
                                 formatter={(value) =>
                                     value === 'platform_revenue' ? 'Platform Reported' : 'Store Attributed'
                                 }

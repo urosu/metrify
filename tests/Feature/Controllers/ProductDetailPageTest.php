@@ -6,12 +6,11 @@ namespace Tests\Feature\Controllers;
 
 use App\Models\Product;
 use App\Models\Store;
-use App\Models\User;
 use App\Models\Workspace;
-use App\Models\WorkspaceUser;
 use App\Services\WorkspaceContext;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use Tests\Concerns\WithOnboardedWorkspace;
 use Tests\TestCase;
 
 /**
@@ -30,28 +29,14 @@ use Tests\TestCase;
 class ProductDetailPageTest extends TestCase
 {
     use RefreshDatabase;
+    use WithOnboardedWorkspace;
 
-    private User $user;
-    private Workspace $workspace;
-    private Store $store;
     private Product $product;
 
     protected function setUp(): void
     {
         parent::setUp();
-
-        $this->user      = User::factory()->create();
-        $this->workspace = Workspace::factory()->create(['owner_id' => $this->user->id]);
-
-        WorkspaceUser::factory()->owner()->create([
-            'user_id'      => $this->user->id,
-            'workspace_id' => $this->workspace->id,
-        ]);
-
-        $this->store = Store::factory()->create([
-            'workspace_id'             => $this->workspace->id,
-            'historical_import_status' => 'completed',
-        ]);
+        $this->setUpOnboardedWorkspace();
 
         $this->product = Product::withoutGlobalScopes()->create([
             'workspace_id' => $this->workspace->id,

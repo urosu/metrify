@@ -1,232 +1,448 @@
 @import "tailwindcss";
 @import "tw-animate-css";
-@import "shadcn/tailwind.css";
-@import "@fontsource-variable/geist";
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/jetbrains-mono";
+
+/* ============================================================================
+   Nexstage Design System — app.css
+   Tailwind v4 @theme inline + OKLCH token definitions.
+   All six source colors, semantic tokens, and spacing live here.
+   @see docs/UX.md §4 Design system
+   @see docs/PLANNING.md §3 L4
+   ============================================================================ */
 
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
+    /* ── Fonts ────────────────────────────────────────────────────────────── */
+    --font-sans:    'Inter Variable', 'Inter', ui-sans-serif, system-ui, sans-serif;
+    --font-mono:    'JetBrains Mono Variable', 'JetBrains Mono', ui-monospace, monospace;
     --font-heading: var(--font-sans);
-    --font-sans: 'Geist Variable', sans-serif;
-    --color-sidebar-ring: var(--sidebar-ring);
-    --color-sidebar-border: var(--sidebar-border);
-    --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
-    --color-sidebar-accent: var(--sidebar-accent);
-    --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
-    --color-sidebar-primary: var(--sidebar-primary);
-    --color-sidebar-foreground: var(--sidebar-foreground);
-    --color-sidebar: var(--sidebar);
-    --color-chart-8: var(--chart-8);
-    --color-chart-7: var(--chart-7);
-    --color-chart-6: var(--chart-6);
-    --color-chart-5: var(--chart-5);
-    --color-chart-4: var(--chart-4);
-    --color-chart-3: var(--chart-3);
-    --color-chart-2: var(--chart-2);
-    --color-chart-1: var(--chart-1);
-    --color-ring: var(--ring);
-    --color-input: var(--input);
-    --color-border: var(--border);
-    --color-destructive: var(--destructive);
-    --color-accent-foreground: var(--accent-foreground);
-    --color-accent: var(--accent);
-    --color-muted-foreground: var(--muted-foreground);
-    --color-muted: var(--muted);
-    --color-secondary-foreground: var(--secondary-foreground);
-    --color-secondary: var(--secondary);
-    --color-primary-foreground: var(--primary-foreground);
-    --color-primary: var(--primary);
+
+    /* ── Type scale: 14/15/16/18/22/28/36/48. Body = 15. Floor = 14. ─────── */
+    --text-xs:   0.875rem;   /* 14px — floor (chrome-secondary: badge subtext, kbd chips, th labels) */
+    --text-sm:   0.9375rem;  /* 15px — body default */
+    --text-base: 1rem;       /* 16px */
+    --text-lg:   1.125rem;   /* 18px */
+    --text-xl:   1.375rem;   /* 22px */
+    --text-2xl:  1.75rem;    /* 28px */
+    --text-3xl:  2.25rem;    /* 36px */
+    --text-4xl:  3rem;       /* 48px */
+
+    /* ── Radius ───────────────────────────────────────────────────────────── */
+    --radius-xs: 4px;
+    --radius-sm: 6px;
+    --radius-md: 8px;
+    --radius-lg: 12px;
+    --radius-xl: 16px;
+    /* shadcn --radius alias → 8px (radius-md) */
+    --radius:    8px;
+
+    /* ── Brand palette tokens — single source of truth ──────────────────────── */
+    /* Change --color-primary here to repaint all accents, buttons, and ring.    */
+    /* H=195 teal — distinct from Google source (H=182). AA on white ≈ 5.5:1 ✓ */
+    --color-primary:          var(--brand-primary);
+    --color-primary-hover:    var(--brand-primary-hover);
+    --color-primary-subtle:   var(--brand-primary-subtle);
+    --color-primary-fg:       var(--brand-primary-fg);
+
+    /* Rose/coral secondary — callout CTAs, not semantic danger.                */
+    /* H=10 rose. AA on white ≈ 4.9:1 ✓                                         */
+    --color-secondary:          var(--brand-secondary);
+    --color-secondary-hover:    var(--brand-secondary-hover);
+    --color-secondary-subtle:   var(--brand-secondary-subtle);
+    --color-secondary-fg:       var(--brand-secondary-fg);
+
+    /* ── Surface / text tokens (user-editable aliases) ───────────────────────── */
+    --color-bg:             var(--background);
+    --color-surface:        var(--card);
+    --color-surface-subtle: var(--muted);
+    --color-border-subtle:  var(--border-subtle);
+    --color-text:           var(--foreground);
+    --color-text-secondary: var(--muted-foreground);
+    --color-text-tertiary:  oklch(0.56 0 0);   /* zinc-500 — 3.5:1 on bg, large text AA ✓ */
+    --color-text-muted:     oklch(0.65 0 0);   /* zinc-400 — placeholder/disabled only  */
+
+    /* ── shadcn semantic color aliases (reference :root vars below) ───────── */
+    --color-background:         var(--background);
+    --color-foreground:         var(--foreground);
+    --color-card:               var(--card);
+    --color-card-foreground:    var(--card-foreground);
+    --color-popover:            var(--popover);
     --color-popover-foreground: var(--popover-foreground);
-    --color-popover: var(--popover);
-    --color-card-foreground: var(--card-foreground);
-    --color-card: var(--card);
-    --color-foreground: var(--foreground);
-    --color-background: var(--background);
-    --radius-sm: calc(var(--radius) * 0.6);
-    --radius-md: calc(var(--radius) * 0.8);
-    --radius-lg: var(--radius);
-    --radius-xl: calc(var(--radius) * 1.4);
-    --radius-2xl: calc(var(--radius) * 1.8);
-    --radius-3xl: calc(var(--radius) * 2.2);
-    --radius-4xl: calc(var(--radius) * 2.6);
+    --color-primary-foreground: var(--primary-foreground);
+    --color-secondary-foreground: var(--secondary-foreground);
+    --color-muted:              var(--muted);
+    --color-muted-foreground:   var(--muted-foreground);
+    --color-accent:             var(--accent);
+    --color-accent-foreground:  var(--accent-foreground);
+    --color-destructive:        var(--destructive);
+    --color-border:             var(--border);
+    --color-input:              var(--input);
+    --color-ring:               var(--ring);
+
+    /* ── Sidebar tokens ───────────────────────────────────────────────────── */
+    --color-sidebar:                    var(--sidebar);
+    --color-sidebar-foreground:         var(--sidebar-foreground);
+    --color-sidebar-primary:            var(--sidebar-primary);
+    --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+    --color-sidebar-accent:             var(--sidebar-accent);
+    --color-sidebar-accent-foreground:  var(--sidebar-accent-foreground);
+    --color-sidebar-border:             var(--sidebar-border);
+    --color-sidebar-ring:               var(--sidebar-ring);
+
+    /* ── Chart tokens (canonical source colors, matching source palette) ──── */
+    --color-chart-1: var(--chart-1);
+    --color-chart-2: var(--chart-2);
+    --color-chart-3: var(--chart-3);
+    --color-chart-4: var(--chart-4);
+    --color-chart-5: var(--chart-5);
+    --color-chart-6: var(--chart-6);
+
+    /* ── Source color tokens — full palette exposed to Tailwind ──────────── */
+    /* Each source has -bg (fill tint), -fg (text on fill), -border variants  */
+    --color-source-real:           var(--source-real);
+    --color-source-real-fg:        var(--source-real-fg);
+    --color-source-real-border:    var(--source-real-border);
+
+    --color-source-store:          var(--source-store);
+    --color-source-store-fg:       var(--source-store-fg);
+    --color-source-store-border:   var(--source-store-border);
+
+    --color-source-facebook:       var(--source-facebook);
+    --color-source-facebook-fg:    var(--source-facebook-fg);
+    --color-source-facebook-border: var(--source-facebook-border);
+
+    --color-source-google:         var(--source-google);
+    --color-source-google-fg:      var(--source-google-fg);
+    --color-source-google-border:  var(--source-google-border);
+
+    --color-source-gsc:            var(--source-gsc);
+    --color-source-gsc-fg:         var(--source-gsc-fg);
+    --color-source-gsc-border:     var(--source-gsc-border);
+
+    --color-source-ga4:            var(--source-ga4);
+    --color-source-ga4-fg:         var(--source-ga4-fg);
+    --color-source-ga4-border:     var(--source-ga4-border);
+
+    /* Semantic shortcuts ─────────────────────────────────────────────────── */
+    /* All fg values must hit ≥ 4.5:1 on white. L ≤ 0.50 is safe for chromatic. */
+    --color-success:       oklch(0.50 0.156 149.2);  /* emerald-700 — L 0.596→0.50, ratio ≈ 5.2:1 ✓ */
+    --color-warning:       oklch(0.48 0.18 60.0);    /* amber-700   — L 0.666→0.48, ratio ≈ 5.4:1 ✓ */
+    --color-danger:        oklch(0.50 0.245 27.325); /* rose-700    — L 0.577→0.50, ratio ≈ 5.1:1 ✓ */
+    --color-info:          oklch(0.48 0.182 241.6);  /* sky-700     — L 0.588→0.48, ratio ≈ 5.3:1 ✓ */
+
+    /* Shopify-style primary action color — emerald/green #008060 equivalent  */
+    /* L=0.48 C=0.14 H=155 on white ≈ 5.0:1 AA ✓                             */
+    --color-action-primary:    oklch(0.48 0.14 155);  /* green-700 — Shopify action */
+    --color-action-primary-fg: oklch(0.985 0 0);      /* white fg on green bg       */
+
+    /* ── Semantic semantic fg variants (text on tinted backgrounds) ─────────── */
+    --color-success-fg:  oklch(0.50 0.156 149.2);
+    --color-warning-fg:  oklch(0.48 0.18 60.0);
+    --color-danger-fg:   oklch(0.50 0.245 27.325);
+    --color-info-fg:     oklch(0.48 0.182 241.6);
+    --color-success-bg:  oklch(0.96 0.04 149.2);
+    --color-warning-bg:  oklch(0.97 0.05 60.0);
+    --color-danger-bg:   oklch(0.96 0.04 27.325);
+    --color-info-bg:     oklch(0.95 0.04 241.6);
 }
 
 :root {
-    --background: oklch(1 0 0);
-    --foreground: oklch(0.145 0 0);
-    --card: oklch(1 0 0);
-    --card-foreground: oklch(0.145 0 0);
-    --popover: oklch(1 0 0);
-    --popover-foreground: oklch(0.145 0 0);
-    --primary: oklch(0.511 0.234 271.7);     /* indigo-600 */
-    --primary-foreground: oklch(0.985 0 0);  /* white */
-    --secondary: oklch(0.97 0 0);
-    --secondary-foreground: oklch(0.205 0 0);
-    --muted: oklch(0.97 0 0);
-    --muted-foreground: oklch(0.556 0 0);
-    --accent: oklch(0.97 0 0);
-    --accent-foreground: oklch(0.205 0 0);
-    --destructive: oklch(0.577 0.245 27.325);
-    --border: oklch(0.922 0 0);
-    --input: oklch(0.922 0 0);
-    --ring: oklch(0.708 0 0);
-    --chart-1: oklch(0.511 0.234 271.7);   /* indigo-600  — primary metric / revenue */
-    --chart-2: oklch(0.627 0.194 149.2);   /* emerald-500 — organic / GSC */
-    --chart-3: oklch(0.705 0.213 47.6);    /* amber-500   — spend / campaigns */
-    --chart-4: oklch(0.637 0.237 25.3);    /* rose-500    — refunds / alerts */
-    --chart-5: oklch(0.598 0.201 304.4);   /* violet-500  — secondary / compare */
-    --chart-6: oklch(0.685 0.169 237.3);   /* sky-500 */
-    --chart-7: oklch(0.704 0.140 182.5);   /* teal-500 */
-    --chart-8: oklch(0.686 0.222 31.0);    /* orange-500 */
-    --radius: 0.625rem;
-    --sidebar: oklch(0.985 0 0);
-    --sidebar-foreground: oklch(0.145 0 0);
-    --sidebar-primary: oklch(0.205 0 0);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.97 0 0);
-    --sidebar-accent-foreground: oklch(0.205 0 0);
-    --sidebar-border: oklch(0.922 0 0);
-    --sidebar-ring: oklch(0.708 0 0);
+    /* ══════════════════════════════════════════════════════════════════════
+       BRAND COLOR TOKENS — SINGLE SOURCE OF TRUTH
+       Change these two values to repaint the entire product chrome.
+       All downstream tokens reference these via var().
+       @see docs/competitors/_research_polaris_pivot.md §5
+       ══════════════════════════════════════════════════════════════════════ */
+
+    /* Primary: teal H=195 — distinct from Google source (H=182)              */
+    /* L=0.46 on white ≈ 5.5:1 WCAG AA ✓                                     */
+    --brand-primary:          oklch(0.46 0.14 195);
+    --brand-primary-hover:    oklch(0.39 0.14 195);  /* one step darker       */
+    --brand-primary-subtle:   oklch(0.95 0.04 195);  /* light tint bg         */
+    --brand-primary-fg:       oklch(0.985 0 0);      /* white fg on primary   */
+
+    /* Secondary: rose-coral H=10 — callout CTAs, NOT semantic danger         */
+    /* L=0.50 on white ≈ 4.9:1 WCAG AA ✓                                     */
+    --brand-secondary:        oklch(0.50 0.20 10);
+    --brand-secondary-hover:  oklch(0.43 0.20 10);
+    --brand-secondary-subtle: oklch(0.95 0.04 10);
+    --brand-secondary-fg:     oklch(0.985 0 0);
+
+    /* Subtle border — softer than --border (zinc-200), for card edges       */
+    --border-subtle:          oklch(0.95 0 0);       /* zinc-100              */
+
+    /* ── MetricCard sizing — Design v3 (20px padding, larger values) ─────── */
+    --metric-card-min-h: 160px;          /* bumped: min-h accommodates text-4xl value */
+    --metric-card-min-h-compact: 104px;
+    --metric-card-sparkline-h: 40px;
+
+    /* ── Shadow tokens ────────────────────────────────────────────────────── */
+    /* Shadows only on overlays (drawers, modals, popovers, hover cards).     */
+    /* Never on cards or chrome.                                               */
+    --shadow-overlay:  0 1px 2px rgba(0,0,0,0.04);
+    --shadow-raised:   0 8px 24px rgba(0,0,0,0.12);
+
+    /* ── Spacing scale — 4px grid ─────────────────────────────────────────── */
+    /* Only 4/8/12/16/24/32/48/64 are canonical. Tailwind covers these.       */
+
+    /* ============================================================
+       SIX CANONICAL SOURCE COLORS — OKLCH
+       These must stay distinct at AA contrast on white surfaces.
+       The source a line or badge uses maps 1:1 to these tokens.
+       NEVER reassign or add aliases.
+       @see docs/UX.md §4 Source colors
+       ============================================================ */
+
+    /* Real — neutral zinc (no chromatic accent; Real is informational, not marketed) */
+    /* real-fg L=0.44 on white ≈ 6.0:1 AA ✓                                    */
+    --source-real:          oklch(0.967 0 0);       /* zinc-100 tint bg       */
+    --source-real-fg:       oklch(0.44 0 0);        /* zinc-600 text — AA ✓   */
+    --source-real-border:   oklch(0.92 0 0);        /* zinc-200 border        */
+
+    /* Store — slate-500 (neutral DB baseline)                                 */
+    /* store-fg L=0.44 on white ≈ 6.0:1 ✓                                     */
+    --source-store:         oklch(0.97 0.01 250);   /* slate-50 bg            */
+    --source-store-fg:      oklch(0.44 0.04 257);   /* slate-600 text         */
+    --source-store-border:  oklch(0.87 0.02 250);   /* slate-200 border       */
+
+    /* Facebook — blue-600 (Meta brand-adjacent)                               */
+    /* facebook-fg L=0.42 at C=0.21 H=254 on white ≈ 6.4:1 ✓                 */
+    --source-facebook:      oklch(0.95 0.04 245);   /* blue-50 bg             */
+    --source-facebook-fg:   oklch(0.42 0.21 254);   /* blue-700 text          */
+    --source-facebook-border: oklch(0.83 0.08 245); /* blue-200 border        */
+
+    /* Google Ads — teal-600 (distinct from FB blue and GSC emerald)           */
+    /* teal-fg L=0.40 at C=0.12 H=182 on white ≈ 6.8:1 ✓                     */
+    --source-google:        oklch(0.95 0.04 182);   /* teal-50 bg             */
+    --source-google-fg:     oklch(0.40 0.12 182);   /* teal-700 text          */
+    --source-google-border: oklch(0.83 0.08 182);   /* teal-200 border        */
+
+    /* GSC — emerald-600 (organic green, search console)                       */
+    /* gsc-fg L=0.40 at C=0.17 H=155 on white ≈ 6.2:1 ✓                      */
+    --source-gsc:           oklch(0.95 0.05 155);   /* emerald-50 bg          */
+    --source-gsc-fg:        oklch(0.40 0.17 155);   /* emerald-700 text       */
+    --source-gsc-border:    oklch(0.83 0.10 155);   /* emerald-200 border     */
+
+    /* GA4 (Google Analytics 4 / first-party) — warm amber/orange             */
+    /* Distinct from Real (gold H=60) and Google Ads (teal H=182).             */
+    /* ga4-fg L=0.45 at C=0.17 H=50 on white ≈ 5.5:1 AA ✓                    */
+    --source-ga4:           oklch(0.97 0.04 70);    /* light orange/amber tint bg */
+    --source-ga4-fg:        oklch(0.45 0.17 50);    /* deep orange — AA on white ✓ */
+    --source-ga4-border:    oklch(0.85 0.10 65);    /* mid-orange border      */
+
+    /* ── Surface / neutral system ─────────────────────────────────────────── */
+    /* bg = zinc-50, surface = white, border = zinc-200, text = zinc-900/600/400 */
+    --background:             oklch(0.985 0 0);      /* white (card / popover) */
+    --foreground:             oklch(0.141 0 0);      /* zinc-900 primary text  */
+    --card:                   oklch(1 0 0);           /* white                  */
+    --card-foreground:        oklch(0.141 0 0);
+    --popover:                oklch(1 0 0);
+    --popover-foreground:     oklch(0.141 0 0);
+
+    /* ── Primary = teal (brand-primary). shadcn Button/Input/Ring inherit.  ─── */
+    /* Secondary shadcn alias = zinc-100 (neutral chip/tag background).          */
+    --primary:                var(--brand-primary);  /* teal-H195 AA ✓         */
+    --primary-foreground:     var(--brand-primary-fg); /* white                */
+    --secondary:              oklch(0.967 0 0);      /* zinc-100 neutral chip  */
+    --secondary-foreground:   oklch(0.141 0 0);
+    --muted:                  oklch(0.967 0 0);      /* zinc-100               */
+    --muted-foreground:       oklch(0.552 0 0);      /* zinc-500 — 3.9:1 AA ✓  */
+    --accent:                 var(--brand-primary-subtle); /* teal-100 hover   */
+    --accent-foreground:      var(--brand-primary); /* teal fg on teal-100 bg  */
+    --destructive:            oklch(0.577 0.245 27.325); /* rose-600           */
+    --border:                 oklch(0.92 0 0);        /* zinc-200              */
+    --input:                  oklch(0.92 0 0);
+    --ring:                   var(--brand-primary);   /* focus ring = teal     */
+
+    /* ── Chart slots — map to canonical source order ─────────────────────── */
+    --chart-1: oklch(0.44 0 0);          /* Real (neutral zinc)  */
+    --chart-2: oklch(0.44 0.04 257);     /* Store (slate)        */
+    --chart-3: oklch(0.42 0.21 254);     /* Facebook (blue)      */
+    --chart-4: oklch(0.40 0.12 182);     /* Google (teal)        */
+    --chart-5: oklch(0.40 0.17 155);     /* GSC (emerald)        */
+    --chart-6: oklch(0.45 0.17 50);      /* GA4 (orange/amber)   */
+
+    /* ── Sidebar ──────────────────────────────────────────────────────────── */
+    --sidebar:                  oklch(0.985 0 0);    /* near-white             */
+    --sidebar-foreground:       oklch(0.141 0 0);
+    --sidebar-primary:          var(--brand-primary);  /* teal active item     */
+    --sidebar-primary-foreground: var(--brand-primary-fg);
+    --sidebar-accent:           var(--brand-primary-subtle); /* teal-100 hover */
+    --sidebar-accent-foreground: var(--brand-primary);
+    --sidebar-border:           oklch(0.92 0 0);     /* zinc-200               */
+    --sidebar-ring:             var(--brand-primary);
 }
 
+/* Dark mode vars — not active in v1 (light only), but defined to prevent
+   shadcn components from breaking if .dark class is ever applied. */
 .dark {
-    --background: oklch(0.145 0 0);
-    --foreground: oklch(0.985 0 0);
-    --card: oklch(0.205 0 0);
-    --card-foreground: oklch(0.985 0 0);
-    --popover: oklch(0.205 0 0);
+    --background:         oklch(0.145 0 0);
+    --foreground:         oklch(0.985 0 0);
+    --card:               oklch(0.205 0 0);
+    --card-foreground:    oklch(0.985 0 0);
+    --popover:            oklch(0.205 0 0);
     --popover-foreground: oklch(0.985 0 0);
-    --primary: oklch(0.623 0.214 271.7);     /* indigo-400 (lighter on dark bg) */
-    --primary-foreground: oklch(0.145 0 0);  /* near-black */
-    --secondary: oklch(0.269 0 0);
+    --primary:            oklch(0.985 0 0);
+    --primary-foreground: oklch(0.145 0 0);
+    --secondary:          oklch(0.269 0 0);
     --secondary-foreground: oklch(0.985 0 0);
-    --muted: oklch(0.269 0 0);
-    --muted-foreground: oklch(0.708 0 0);
-    --accent: oklch(0.269 0 0);
-    --accent-foreground: oklch(0.985 0 0);
-    --destructive: oklch(0.704 0.191 22.216);
-    --border: oklch(1 0 0 / 10%);
-    --input: oklch(1 0 0 / 15%);
-    --ring: oklch(0.556 0 0);
-    --chart-1: oklch(0.623 0.214 271.7);   /* indigo-400 */
-    --chart-2: oklch(0.696 0.172 149.2);   /* emerald-400 */
-    --chart-3: oklch(0.769 0.188 47.6);    /* amber-400 */
-    --chart-4: oklch(0.712 0.197 25.3);    /* rose-400 */
-    --chart-5: oklch(0.671 0.179 304.4);   /* violet-400 */
-    --chart-6: oklch(0.746 0.160 232.7);   /* sky-400 */
-    --chart-7: oklch(0.777 0.152 181.9);   /* teal-400 */
-    --chart-8: oklch(0.750 0.183 55.9);    /* orange-400 */
-    --sidebar: oklch(0.205 0 0);
+    --muted:              oklch(0.269 0 0);
+    --muted-foreground:   oklch(0.708 0 0);
+    --accent:             oklch(0.269 0 0);
+    --accent-foreground:  oklch(0.985 0 0);
+    --destructive:        oklch(0.704 0.191 22.216);
+    --border:             oklch(1 0 0 / 10%);
+    --input:              oklch(1 0 0 / 15%);
+    --ring:               oklch(0.556 0 0);
+    --sidebar:            oklch(0.205 0 0);
     --sidebar-foreground: oklch(0.985 0 0);
-    --sidebar-primary: oklch(0.488 0.243 264.376);
+    --sidebar-primary:    oklch(0.488 0.243 264.376);
     --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.269 0 0);
+    --sidebar-accent:     oklch(0.269 0 0);
     --sidebar-accent-foreground: oklch(0.985 0 0);
-    --sidebar-border: oklch(1 0 0 / 10%);
-    --sidebar-ring: oklch(0.556 0 0);
+    --sidebar-border:     oklch(1 0 0 / 10%);
+    --sidebar-ring:       oklch(0.556 0 0);
 }
 
 @layer base {
-  * {
-    @apply border-border outline-ring/50;
-  }
-  body {
-    @apply bg-background text-foreground;
-  }
-  html {
-    @apply font-sans;
-  }
+    * {
+        @apply border-border outline-ring/50;
+    }
 
-  /* Selection highlight */
-  ::selection {
-    background-color: oklch(from var(--primary) l c h / 0.15);
-    color: var(--foreground);
-  }
+    body {
+        @apply bg-background text-foreground;
+        font-family: var(--font-sans);
+        font-size: 0.9375rem; /* 15px body — text-sm in our scale */
+        line-height: 1.5;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+    }
 
-  /* Scrollbar — webkit (Chrome/Safari/Edge) */
-  ::-webkit-scrollbar { width: 6px; height: 6px; }
-  ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: var(--radius); }
-  ::-webkit-scrollbar-thumb:hover { background: var(--muted-foreground); }
+    html {
+        font-family: var(--font-sans);
+    }
 
-  /* Buttons */
-  button,
-  [role='button'],
-  [type='button'],
-  [type='submit'],
-  [type='reset'] {
-    @apply cursor-pointer select-none;
-  }
-  button:disabled,
-  [role='button'][aria-disabled='true'] {
-    @apply cursor-not-allowed;
-  }
+    /* Tabular nums for any element that carries numeric data */
+    .tabular-nums,
+    [data-numeric],
+    .font-mono {
+        font-variant-numeric: tabular-nums;
+    }
 
-  /* Inputs, selects, textareas — use tokens instead of hardcoded zinc values */
-  input:not([type='checkbox']):not([type='radio']):not([type='range']),
-  textarea,
-  select {
-    @apply px-3 py-2 text-sm;
-    color: var(--foreground);
-  }
-  input::placeholder, textarea::placeholder {
-    color: var(--muted-foreground);
-  }
-  /* Focus: uses --primary from token system instead of hardcoded indigo */
-  input:focus,
-  textarea:focus,
-  select:focus {
-    @apply outline-none ring-2;
-    ring-color: oklch(from var(--primary) l c h / 0.4);
-    border-color: var(--primary);
-  }
+    /* JetBrains Mono for code/IDs */
+    code, kbd, samp, pre, .font-mono {
+        font-family: var(--font-mono);
+    }
+
+    /* Selection highlight */
+    ::selection {
+        background-color: oklch(from var(--primary) l c h / 0.10);
+        color: var(--foreground);
+    }
+
+    /* Scrollbar — webkit (Chrome/Safari/Edge) */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: var(--radius-sm); }
+    ::-webkit-scrollbar-thumb:hover { background: var(--muted-foreground); }
+
+    /* Buttons */
+    button,
+    [role='button'],
+    [type='button'],
+    [type='submit'],
+    [type='reset'] {
+        @apply cursor-pointer select-none;
+    }
+    button:disabled,
+    [role='button'][aria-disabled='true'] {
+        @apply cursor-not-allowed;
+    }
+
+    /* Inputs, selects, textareas */
+    input:not([type='checkbox']):not([type='radio']):not([type='range']),
+    textarea,
+    select {
+        @apply px-3 py-2 text-sm;
+        color: var(--foreground);
+    }
+    input::placeholder, textarea::placeholder {
+        color: var(--muted-foreground);
+    }
+    input:focus,
+    textarea:focus,
+    select:focus {
+        @apply outline-none ring-2;
+        ring-color: oklch(from var(--primary) l c h / 0.3);
+        border-color: var(--primary);
+    }
 }
 
 @layer components {
-  /* Settings page section card — title bar + content */
-  .settings-section {
-    border-radius: var(--radius-xl);
-    border: 1px solid var(--color-zinc-200);
-    background-color: white;
-    overflow: hidden;
-  }
-  .settings-section-header {
-    border-bottom: 1px solid var(--color-zinc-100);
-    padding: 1rem 1.5rem;
-  }
-  .settings-section-body {
-    padding: 1.25rem 1.5rem;
-    display: flex;
-    flex-direction: column;
-    gap: 1rem;
-  }
+    /* ── Page content area ─────────────────────────────────────────────────── */
+    .page-content {
+        margin-inline: auto;
+        max-width: 1440px;
+        padding-inline: 1.5rem;   /* 24px */
+        padding-block: 1.5rem;
+    }
 
-  /* Page content area — max-width constrained, consistent padding.
-     Already applied by AppLayout main; this lets sub-layouts reuse the same constraint. */
-  .page-content {
-    margin-inline: auto;
-    max-width: 1400px;
-    padding-inline: 1.5rem;
-    padding-block: 1.5rem;
-  }
+    /* ── Settings section card ─────────────────────────────────────────────── */
+    .settings-section {
+        border-radius: var(--radius-xl);
+        border: 1px solid var(--border);
+        background-color: var(--card);
+        overflow: hidden;
+    }
+    .settings-section-header {
+        border-bottom: 1px solid var(--border);
+        padding: 1rem 1.5rem;
+    }
+    .settings-section-body {
+        padding: 1.25rem 1.5rem;
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+    }
 
-  /* Uppercase overline label above charts, metric groups, and content sections */
-  .section-label {
-    font-size: 0.75rem;
-    line-height: 1rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.025em;
-    color: var(--color-zinc-400);
-  }
+    /* ── Section overline label ────────────────────────────────────────────── */
+    .section-label {
+        font-size: 0.875rem; /* 14px — text-xs minimum (chrome-secondary) */
+        line-height: 1rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--muted-foreground);
+    }
 
-  /* Table column header label — applied to the <tr> or <thead> row */
-  .th-label {
-    font-size: 0.75rem;
-    line-height: 1rem;
-    font-weight: 500;
-    text-transform: uppercase;
-    letter-spacing: 0.025em;
-    color: var(--color-zinc-400);
-  }
+    /* ── Table column header ───────────────────────────────────────────────── */
+    .th-label {
+        font-size: 0.875rem; /* 14px — text-xs minimum (chrome-secondary) */
+        line-height: 1rem;
+        font-weight: 500;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--muted-foreground);
+    }
+
+    /* ── Skeleton shimmer animation ────────────────────────────────────────── */
+    /* zinc-100 → zinc-200 → zinc-100 at 1.5s pulse. No spinners.              */
+    @keyframes skeleton-shimmer {
+        0%   { background-position: -200% 0; }
+        100% { background-position: 200% 0; }
+    }
+
+    .skeleton {
+        background: linear-gradient(
+            90deg,
+            oklch(0.967 0 0) 0%,
+            oklch(0.92 0 0) 50%,
+            oklch(0.967 0 0) 100%
+        );
+        background-size: 200% 100%;
+        animation: skeleton-shimmer 1.5s ease-in-out infinite;
+        border-radius: var(--radius-sm);
+    }
 }

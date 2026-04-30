@@ -31,6 +31,318 @@ use Inertia\Response;
 
 class IntegrationsController extends Controller
 {
+    /**
+     * /integrations — top-level Tracking Health dashboard.
+     *
+     * Serves mock data until the real aggregation layer lands (see docs/planning/backend.md
+     * §IntegrationsController). Six sources: store, facebook, google, gsc, ga4, real.
+     *
+     * Shape IS the final contract — no DB changes needed to ship v1.
+     * Real aggregation wires into daily_snapshots / integration_runs once those tables
+     * carry per-source accuracy rows.
+     *
+     * Sync feed: 50 events (Vercel deployment list pattern — enough to diagnose a pattern
+     * without overwhelming). Row click → DrawerSidePanel with raw JSON payload.
+     * GA4 card: labeled "GA4" and shows "Connect GA4" CTA — first-class source per memory.
+     *
+     * @see docs/pages/integrations.md
+     * @see docs/competitors/elevar.md#key-screens Channel Accuracy Report
+     * @see docs/competitors/_research_integrations_page.md
+     */
+    public function index(Request $request): Response
+    {
+        $workspace = Workspace::findOrFail(app(WorkspaceContext::class)->id());
+
+        // 30-day sparkline helper — realistic health trend 72–100
+        $healthSparkline = [82,84,81,85,87,88,86,89,90,88,87,85,86,88,89,91,90,88,87,86,87,88,89,90,89,88,87,86,87,87];
+
+        $syncSparkline = fn(int $base) => array_map(
+            fn($_) => max(0, $base + random_int(-8, 8)),
+            range(0, 29),
+        );
+
+        // 50-event sync feed (Vercel deployment-list analog).
+        // Each event carries a minimal payload for the Elevar-style payload inspector drawer.
+        $syncEvents = [
+            // ── Most-recent 15 ────────────────────────────────────────────────
+            ['id' => 1,  'ts' => now()->subMinutes(3)->toISOString(),  'integration' => 'shopify',  'action' => 'orders.poll',      'records' => 14,  'errors' => 0, 'duration_ms' => 842,  'status' => 'success', 'payload' => ['event' => 'orders.poll', 'source' => 'shopify', 'records_written' => 14, 'errors' => []]],
+            ['id' => 2,  'ts' => now()->subMinutes(18)->toISOString(), 'integration' => 'google',   'action' => 'ad_insights.sync', 'records' => 220, 'errors' => 0, 'duration_ms' => 1240, 'status' => 'success', 'payload' => ['event' => 'ad_insights.sync', 'source' => 'google', 'records_written' => 220, 'date_range' => '2026-04-29', 'errors' => []]],
+            ['id' => 3,  'ts' => now()->subMinutes(47)->toISOString(), 'integration' => 'facebook', 'action' => 'ad_insights.sync', 'records' => 185, 'errors' => 1, 'duration_ms' => 2100, 'status' => 'partial', 'payload' => ['event' => 'ad_insights.sync', 'source' => 'facebook', 'records_written' => 185, 'errors' => [['code' => '#100', 'message' => 'Missing user_data.em']]]],
+            ['id' => 4,  'ts' => now()->subMinutes(62)->toISOString(), 'integration' => 'shopify',  'action' => 'orders.poll',      'records' => 8,   'errors' => 0, 'duration_ms' => 710,  'status' => 'success', 'payload' => ['event' => 'orders.poll', 'source' => 'shopify', 'records_written' => 8,   'errors' => []]],
+            ['id' => 5,  'ts' => now()->subHours(2)->toISOString(),    'integration' => 'google',   'action' => 'ad_insights.sync', 'records' => 190, 'errors' => 0, 'duration_ms' => 980,  'status' => 'success', 'payload' => ['event' => 'ad_insights.sync', 'source' => 'google', 'records_written' => 190, 'errors' => []]],
+            ['id' => 6,  'ts' => now()->subHours(3)->toISOString(),    'integration' => 'facebook', 'action' => 'capi.delivery',    'records' => 42,  'errors' => 2, 'duration_ms' => 580,  'status' => 'partial', 'payload' => ['event' => 'capi.delivery', 'source' => 'facebook', 'records_written' => 42, 'errors' => [['code' => '#100', 'event' => 'purchase'], ['code' => '#200', 'event' => 'add_to_cart']]]],
+            ['id' => 7,  'ts' => now()->subHours(4)->toISOString(),    'integration' => 'shopify',  'action' => 'refunds.poll',     'records' => 3,   'errors' => 0, 'duration_ms' => 320,  'status' => 'success', 'payload' => ['event' => 'refunds.poll', 'source' => 'shopify', 'records_written' => 3, 'errors' => []]],
+            ['id' => 8,  'ts' => now()->subHours(5)->toISOString(),    'integration' => 'gsc',      'action' => 'queries.sync',     'records' => 840, 'errors' => 0, 'duration_ms' => 4200, 'status' => 'success', 'payload' => ['event' => 'queries.sync', 'source' => 'gsc', 'date_range' => '2026-04-27', 'records_written' => 840, 'errors' => []]],
+            ['id' => 9,  'ts' => now()->subHours(6)->toISOString(),    'integration' => 'ga4',      'action' => 'events.poll',      'records' => 0,   'errors' => 1, 'duration_ms' => 120,  'status' => 'error',   'payload' => ['event' => 'events.poll', 'source' => 'ga4', 'records_written' => 0, 'errors' => [['code' => 'DATA_NOT_FOUND', 'message' => 'No events received for property']]]],
+            ['id' => 10, 'ts' => now()->subHours(7)->toISOString(),    'integration' => 'shopify',  'action' => 'orders.poll',      'records' => 22,  'errors' => 0, 'duration_ms' => 920,  'status' => 'success', 'payload' => ['event' => 'orders.poll', 'source' => 'shopify', 'records_written' => 22, 'errors' => []]],
+            ['id' => 11, 'ts' => now()->subHours(8)->toISOString(),    'integration' => 'google',   'action' => 'ad_insights.sync', 'records' => 200, 'errors' => 0, 'duration_ms' => 1100, 'status' => 'success', 'payload' => ['event' => 'ad_insights.sync', 'source' => 'google', 'records_written' => 200, 'errors' => []]],
+            ['id' => 12, 'ts' => now()->subHours(9)->toISOString(),    'integration' => 'facebook', 'action' => 'ad_insights.sync', 'records' => 178, 'errors' => 0, 'duration_ms' => 1900, 'status' => 'success', 'payload' => ['event' => 'ad_insights.sync', 'source' => 'facebook', 'records_written' => 178, 'errors' => []]],
+            ['id' => 13, 'ts' => now()->subHours(10)->toISOString(),   'integration' => 'shopify',  'action' => 'orders.webhook',   'records' => 1,   'errors' => 0, 'duration_ms' => 45,   'status' => 'success', 'payload' => ['event' => 'orders.webhook', 'source' => 'shopify', 'order_id' => 'SHP-10421', 'errors' => []]],
+            ['id' => 14, 'ts' => now()->subHours(11)->toISOString(),   'integration' => 'gsc',      'action' => 'pages.sync',       'records' => 210, 'errors' => 0, 'duration_ms' => 3100, 'status' => 'success', 'payload' => ['event' => 'pages.sync', 'source' => 'gsc', 'records_written' => 210, 'errors' => []]],
+            ['id' => 15, 'ts' => now()->subHours(12)->toISOString(),   'integration' => 'ga4',      'action' => 'events.poll',      'records' => 0,   'errors' => 1, 'duration_ms' => 100,  'status' => 'error',   'payload' => ['event' => 'events.poll', 'source' => 'ga4', 'records_written' => 0, 'errors' => [['code' => 'DATA_NOT_FOUND']]]],
+            // ── Older 35 ─────────────────────────────────────────────────────
+            ['id' => 16, 'ts' => now()->subHours(13)->toISOString(),   'integration' => 'shopify',  'action' => 'orders.poll',      'records' => 31,  'errors' => 0, 'duration_ms' => 860,  'status' => 'success', 'payload' => ['event' => 'orders.poll', 'source' => 'shopify', 'records_written' => 31]],
+            ['id' => 17, 'ts' => now()->subHours(14)->toISOString(),   'integration' => 'google',   'action' => 'ad_insights.sync', 'records' => 215, 'errors' => 0, 'duration_ms' => 1050, 'status' => 'success', 'payload' => ['event' => 'ad_insights.sync', 'source' => 'google', 'records_written' => 215]],
+            ['id' => 18, 'ts' => now()->subHours(15)->toISOString(),   'integration' => 'facebook', 'action' => 'ad_insights.sync', 'records' => 162, 'errors' => 0, 'duration_ms' => 1780, 'status' => 'success', 'payload' => ['event' => 'ad_insights.sync', 'source' => 'facebook', 'records_written' => 162]],
+            ['id' => 19, 'ts' => now()->subHours(16)->toISOString(),   'integration' => 'shopify',  'action' => 'orders.poll',      'records' => 19,  'errors' => 0, 'duration_ms' => 730,  'status' => 'success', 'payload' => ['event' => 'orders.poll', 'source' => 'shopify', 'records_written' => 19]],
+            ['id' => 20, 'ts' => now()->subHours(17)->toISOString(),   'integration' => 'ga4',      'action' => 'events.poll',      'records' => 0,   'errors' => 1, 'duration_ms' => 105,  'status' => 'error',   'payload' => ['event' => 'events.poll', 'source' => 'ga4', 'records_written' => 0, 'errors' => [['code' => 'DATA_NOT_FOUND']]]],
+            ['id' => 21, 'ts' => now()->subHours(18)->toISOString(),   'integration' => 'gsc',      'action' => 'queries.sync',     'records' => 780, 'errors' => 0, 'duration_ms' => 3900, 'status' => 'success', 'payload' => ['event' => 'queries.sync', 'source' => 'gsc', 'records_written' => 780]],
+            ['id' => 22, 'ts' => now()->subHours(19)->toISOString(),   'integration' => 'shopify',  'action' => 'orders.poll',      'records' => 11,  'errors' => 0, 'duration_ms' => 680,  'status' => 'success', 'payload' => ['event' => 'orders.poll', 'source' => 'shopify', 'records_written' => 11]],
+            ['id' => 23, 'ts' => now()->subHours(20)->toISOString(),   'integration' => 'facebook', 'action' => 'capi.delivery',    'records' => 38,  'errors' => 1, 'duration_ms' => 540,  'status' => 'partial', 'payload' => ['event' => 'capi.delivery', 'source' => 'facebook', 'records_written' => 38, 'errors' => [['code' => '#100', 'event' => 'purchase']]]],
+            ['id' => 24, 'ts' => now()->subHours(21)->toISOString(),   'integration' => 'google',   'action' => 'ad_insights.sync', 'records' => 198, 'errors' => 0, 'duration_ms' => 1020, 'status' => 'success', 'payload' => ['event' => 'ad_insights.sync', 'source' => 'google', 'records_written' => 198]],
+            ['id' => 25, 'ts' => now()->subHours(22)->toISOString(),   'integration' => 'shopify',  'action' => 'refunds.poll',     'records' => 1,   'errors' => 0, 'duration_ms' => 290,  'status' => 'success', 'payload' => ['event' => 'refunds.poll', 'source' => 'shopify', 'records_written' => 1]],
+            ['id' => 26, 'ts' => now()->subHours(23)->toISOString(),   'integration' => 'ga4',      'action' => 'events.poll',      'records' => 0,   'errors' => 1, 'duration_ms' => 95,   'status' => 'error',   'payload' => ['event' => 'events.poll', 'source' => 'ga4', 'records_written' => 0]],
+            ['id' => 27, 'ts' => now()->subHours(24)->toISOString(),   'integration' => 'gsc',      'action' => 'pages.sync',       'records' => 195, 'errors' => 0, 'duration_ms' => 2900, 'status' => 'success', 'payload' => ['event' => 'pages.sync', 'source' => 'gsc', 'records_written' => 195]],
+            ['id' => 28, 'ts' => now()->subHours(25)->toISOString(),   'integration' => 'shopify',  'action' => 'orders.poll',      'records' => 27,  'errors' => 0, 'duration_ms' => 810,  'status' => 'success', 'payload' => ['event' => 'orders.poll', 'source' => 'shopify', 'records_written' => 27]],
+            ['id' => 29, 'ts' => now()->subHours(26)->toISOString(),   'integration' => 'google',   'action' => 'ad_insights.sync', 'records' => 204, 'errors' => 0, 'duration_ms' => 1080, 'status' => 'success', 'payload' => ['event' => 'ad_insights.sync', 'source' => 'google', 'records_written' => 204]],
+            ['id' => 30, 'ts' => now()->subHours(27)->toISOString(),   'integration' => 'facebook', 'action' => 'ad_insights.sync', 'records' => 170, 'errors' => 0, 'duration_ms' => 1850, 'status' => 'success', 'payload' => ['event' => 'ad_insights.sync', 'source' => 'facebook', 'records_written' => 170]],
+            ['id' => 31, 'ts' => now()->subHours(28)->toISOString(),   'integration' => 'shopify',  'action' => 'orders.webhook',   'records' => 2,   'errors' => 0, 'duration_ms' => 50,   'status' => 'success', 'payload' => ['event' => 'orders.webhook', 'source' => 'shopify', 'records_written' => 2]],
+            ['id' => 32, 'ts' => now()->subHours(29)->toISOString(),   'integration' => 'ga4',      'action' => 'events.poll',      'records' => 0,   'errors' => 1, 'duration_ms' => 110,  'status' => 'error',   'payload' => ['event' => 'events.poll', 'source' => 'ga4', 'records_written' => 0]],
+            ['id' => 33, 'ts' => now()->subHours(30)->toISOString(),   'integration' => 'shopify',  'action' => 'orders.poll',      'records' => 15,  'errors' => 0, 'duration_ms' => 770,  'status' => 'success', 'payload' => ['event' => 'orders.poll', 'source' => 'shopify', 'records_written' => 15]],
+            ['id' => 34, 'ts' => now()->subHours(31)->toISOString(),   'integration' => 'gsc',      'action' => 'queries.sync',     'records' => 810, 'errors' => 0, 'duration_ms' => 4050, 'status' => 'success', 'payload' => ['event' => 'queries.sync', 'source' => 'gsc', 'records_written' => 810]],
+            ['id' => 35, 'ts' => now()->subHours(32)->toISOString(),   'integration' => 'google',   'action' => 'ad_insights.sync', 'records' => 212, 'errors' => 0, 'duration_ms' => 1120, 'status' => 'success', 'payload' => ['event' => 'ad_insights.sync', 'source' => 'google', 'records_written' => 212]],
+            ['id' => 36, 'ts' => now()->subHours(33)->toISOString(),   'integration' => 'facebook', 'action' => 'capi.delivery',    'records' => 45,  'errors' => 1, 'duration_ms' => 600,  'status' => 'partial', 'payload' => ['event' => 'capi.delivery', 'source' => 'facebook', 'records_written' => 45]],
+            ['id' => 37, 'ts' => now()->subHours(34)->toISOString(),   'integration' => 'shopify',  'action' => 'orders.poll',      'records' => 9,   'errors' => 0, 'duration_ms' => 690,  'status' => 'success', 'payload' => ['event' => 'orders.poll', 'source' => 'shopify', 'records_written' => 9]],
+            ['id' => 38, 'ts' => now()->subHours(35)->toISOString(),   'integration' => 'ga4',      'action' => 'events.poll',      'records' => 0,   'errors' => 1, 'duration_ms' => 98,   'status' => 'error',   'payload' => ['event' => 'events.poll', 'source' => 'ga4', 'records_written' => 0]],
+            ['id' => 39, 'ts' => now()->subHours(36)->toISOString(),   'integration' => 'shopify',  'action' => 'refunds.poll',     'records' => 2,   'errors' => 0, 'duration_ms' => 310,  'status' => 'success', 'payload' => ['event' => 'refunds.poll', 'source' => 'shopify', 'records_written' => 2]],
+            ['id' => 40, 'ts' => now()->subHours(37)->toISOString(),   'integration' => 'google',   'action' => 'ad_insights.sync', 'records' => 208, 'errors' => 0, 'duration_ms' => 1010, 'status' => 'success', 'payload' => ['event' => 'ad_insights.sync', 'source' => 'google', 'records_written' => 208]],
+            ['id' => 41, 'ts' => now()->subHours(38)->toISOString(),   'integration' => 'gsc',      'action' => 'pages.sync',       'records' => 220, 'errors' => 0, 'duration_ms' => 3200, 'status' => 'success', 'payload' => ['event' => 'pages.sync', 'source' => 'gsc', 'records_written' => 220]],
+            ['id' => 42, 'ts' => now()->subHours(39)->toISOString(),   'integration' => 'shopify',  'action' => 'orders.poll',      'records' => 24,  'errors' => 0, 'duration_ms' => 830,  'status' => 'success', 'payload' => ['event' => 'orders.poll', 'source' => 'shopify', 'records_written' => 24]],
+            ['id' => 43, 'ts' => now()->subHours(40)->toISOString(),   'integration' => 'facebook', 'action' => 'ad_insights.sync', 'records' => 172, 'errors' => 0, 'duration_ms' => 1820, 'status' => 'success', 'payload' => ['event' => 'ad_insights.sync', 'source' => 'facebook', 'records_written' => 172]],
+            ['id' => 44, 'ts' => now()->subHours(41)->toISOString(),   'integration' => 'ga4',      'action' => 'events.poll',      'records' => 0,   'errors' => 1, 'duration_ms' => 115,  'status' => 'error',   'payload' => ['event' => 'events.poll', 'source' => 'ga4', 'records_written' => 0]],
+            ['id' => 45, 'ts' => now()->subHours(42)->toISOString(),   'integration' => 'shopify',  'action' => 'orders.webhook',   'records' => 1,   'errors' => 0, 'duration_ms' => 40,   'status' => 'success', 'payload' => ['event' => 'orders.webhook', 'source' => 'shopify', 'records_written' => 1]],
+            ['id' => 46, 'ts' => now()->subHours(43)->toISOString(),   'integration' => 'google',   'action' => 'ad_insights.sync', 'records' => 196, 'errors' => 0, 'duration_ms' => 1030, 'status' => 'success', 'payload' => ['event' => 'ad_insights.sync', 'source' => 'google', 'records_written' => 196]],
+            ['id' => 47, 'ts' => now()->subHours(44)->toISOString(),   'integration' => 'gsc',      'action' => 'queries.sync',     'records' => 820, 'errors' => 0, 'duration_ms' => 4100, 'status' => 'success', 'payload' => ['event' => 'queries.sync', 'source' => 'gsc', 'records_written' => 820]],
+            ['id' => 48, 'ts' => now()->subHours(45)->toISOString(),   'integration' => 'shopify',  'action' => 'orders.poll',      'records' => 18,  'errors' => 0, 'duration_ms' => 750,  'status' => 'success', 'payload' => ['event' => 'orders.poll', 'source' => 'shopify', 'records_written' => 18]],
+            ['id' => 49, 'ts' => now()->subHours(46)->toISOString(),   'integration' => 'facebook', 'action' => 'capi.delivery',    'records' => 40,  'errors' => 0, 'duration_ms' => 560,  'status' => 'success', 'payload' => ['event' => 'capi.delivery', 'source' => 'facebook', 'records_written' => 40]],
+            ['id' => 50, 'ts' => now()->subHours(47)->toISOString(),   'integration' => 'shopify',  'action' => 'refunds.poll',     'records' => 4,   'errors' => 0, 'duration_ms' => 340,  'status' => 'success', 'payload' => ['event' => 'refunds.poll', 'source' => 'shopify', 'records_written' => 4]],
+        ];
+
+        return Inertia::render('Integrations/Index', [
+            'active_tab' => $request->query('tab', 'connected'),
+
+            // ── Tracking Health gauge (Elevar Channel Accuracy Report pattern) ─
+            'tracking_health' => [
+                'score'         => 87,
+                'grade'         => 'B+',
+                'sparkline_30d' => $healthSparkline,
+                'breakdown'     => [
+                    ['name' => 'Order attribution coverage', 'score' => 92, 'weight' => 30],
+                    ['name' => 'Ad conversion data',         'score' => 85, 'weight' => 25],
+                    ['name' => 'UTM coverage',               'score' => 78, 'weight' => 20],
+                    ['name' => 'Sync recency',               'score' => 95, 'weight' => 15],
+                    ['name' => 'Tag coverage',               'score' => 80, 'weight' => 10],
+                ],
+            ],
+
+            // ── KPI strip ─────────────────────────────────────────────────────
+            'summary' => [
+                'connected_count'   => 5,
+                'total_count'       => 6,
+                'last_sync_at'      => now()->subMinutes(3)->toISOString(),
+                'sync_errors_24h'   => 2,
+                'orders_attributed' => 91.4,
+                'tag_coverage'      => 80.0,
+            ],
+
+            // ── Six integration cards (all six sources, GA4 = first-class) ────
+            'integrations' => [
+                [
+                    'id'                => 'shopify_store_1',
+                    'type'              => 'shopify',
+                    'source_token'      => 'store',
+                    'name'              => 'Shopify — main-store.myshopify.com',
+                    'status'            => 'healthy',
+                    'connected_at'      => '2025-12-08T09:00:00Z',
+                    'last_sync_at'      => now()->subMinutes(3)->toISOString(),
+                    'token_expires_at'  => null,
+                    'sync_sparkline_30d'=> $syncSparkline(40),
+                    'health_checks'     => [
+                        ['label' => 'API token valid',       'pass' => true],
+                        ['label' => 'Order webhook firing',  'pass' => true],
+                        ['label' => 'Refund webhook firing', 'pass' => true],
+                        ['label' => 'Inventory sync',        'pass' => true],
+                    ],
+                    'account_info'  => 'Shopify Plus · USD · 4,200 orders/mo',
+                    'oauth_scope'   => 'read_orders, read_products, read_inventory, write_fulfillments',
+                ],
+                [
+                    'id'                => 'facebook_ads',
+                    'type'              => 'facebook',
+                    'source_token'      => 'facebook',
+                    'name'              => 'Facebook Ads — Acme LLC',
+                    'status'            => 'warning',
+                    'connected_at'      => '2026-01-12T14:30:00Z',
+                    'last_sync_at'      => now()->subMinutes(47)->toISOString(),
+                    'token_expires_at'  => now()->addDays(5)->toISOString(),
+                    'sync_sparkline_30d'=> $syncSparkline(55),
+                    'health_checks'     => [
+                        ['label' => 'Pixel firing',            'pass' => true],
+                        ['label' => 'Conversions API sending', 'pass' => true],
+                        ['label' => 'Server-side match rate',  'pass' => false, 'note' => '62% — recommend ≥80%'],
+                        ['label' => 'Access token valid',      'pass' => true,  'note' => 'Expires in 5 days'],
+                    ],
+                    'account_info'  => 'Ad Account #ACT_29481…744 · USD',
+                    'oauth_scope'   => 'ads_management, ads_read, business_management',
+                ],
+                [
+                    'id'                => 'google_ads',
+                    'type'              => 'google',
+                    'source_token'      => 'google',
+                    'name'              => 'Google Ads — Acme Brand',
+                    'status'            => 'healthy',
+                    'connected_at'      => '2026-01-15T11:20:00Z',
+                    'last_sync_at'      => now()->subMinutes(18)->toISOString(),
+                    'token_expires_at'  => null,
+                    'sync_sparkline_30d'=> $syncSparkline(48),
+                    'health_checks'     => [
+                        ['label' => 'OAuth token valid',           'pass' => true],
+                        ['label' => 'Enhanced Conversions active', 'pass' => true],
+                        ['label' => 'Conversion tag firing',       'pass' => true],
+                        ['label' => 'Customer match rate',         'pass' => true, 'note' => '88%'],
+                    ],
+                    'account_info'  => 'Customer #123-456-7890 · EUR',
+                    'oauth_scope'   => 'adwords',
+                ],
+                [
+                    'id'                => 'gsc',
+                    'type'              => 'gsc',
+                    'source_token'      => 'gsc',
+                    'name'              => 'Google Search Console — acme.com',
+                    'status'            => 'warning',
+                    'connected_at'      => '2026-02-01T08:00:00Z',
+                    'last_sync_at'      => now()->subHours(26)->toISOString(),
+                    'token_expires_at'  => null,
+                    'sync_sparkline_30d'=> $syncSparkline(30),
+                    'health_checks'     => [
+                        ['label' => 'Property verified',    'pass' => true],
+                        ['label' => 'Data delivery',        'pass' => true, 'note' => 'GSC-native 48h lag — not an error'],
+                        ['label' => 'Search type: web',     'pass' => true],
+                        ['label' => 'Impressions > 0 (7d)', 'pass' => true],
+                    ],
+                    'account_info'  => 'sc-domain:acme.com · verified',
+                    'oauth_scope'   => 'webmasters.readonly',
+                ],
+                [
+                    // GA4 = first-class source, labeled "GA4" not "Site" or "Google Analytics".
+                    // Connect CTA = "Connect GA4" (per memory: GA4 is a first-class source).
+                    // sibling agent (3B-6) owns the OAuth controller; this card wires the UI.
+                    'id'                => 'ga4',
+                    'type'              => 'ga4',
+                    'source_token'      => 'ga4',
+                    'name'              => 'GA4 — Acme Store',
+                    'status'            => 'error',
+                    'connected_at'      => '2026-01-20T16:45:00Z',
+                    'last_sync_at'      => now()->subHours(28)->toISOString(),
+                    'token_expires_at'  => null,
+                    'sync_sparkline_30d'=> $syncSparkline(20),
+                    'health_checks'     => [
+                        ['label' => 'Property accessible',   'pass' => false, 'note' => 'No events received in 28h'],
+                        ['label' => 'purchase event firing', 'pass' => false, 'note' => '0 events in last 24h'],
+                        ['label' => 'session_start event',   'pass' => true],
+                        ['label' => 'Data stream active',    'pass' => true],
+                    ],
+                    'account_info'  => 'Property 311…984 · G-XXXXXXX',
+                    'oauth_scope'   => 'analytics.readonly',
+                ],
+                [
+                    'id'                => 'woocommerce',
+                    'type'              => 'woocommerce',
+                    'source_token'      => 'store',
+                    'name'              => 'WooCommerce',
+                    'status'            => 'not_connected',
+                    'connected_at'      => null,
+                    'last_sync_at'      => null,
+                    'token_expires_at'  => null,
+                    'sync_sparkline_30d'=> [],
+                    'health_checks'     => [],
+                    'account_info'      => null,
+                    'oauth_scope'       => null,
+                ],
+            ],
+
+            // ── Sync activity feed (50 events — Vercel deployment list pattern) ─
+            'sync_events' => $syncEvents,
+
+            // ── Missing data warnings (critical → warning → info sorted in component) ─
+            'missing_data_warnings' => [
+                ['severity' => 'critical', 'message' => 'GA4: no purchase events received in 28 hours — tag may have stopped firing.',                                    'action_label' => 'View details', 'action_type' => 'details',   'integration_id' => 'ga4'],
+                ['severity' => 'warning',  'message' => 'Facebook Ads: access token expires in 5 days — reconnect to avoid data gaps.',                                  'action_label' => 'Reconnect',    'action_type' => 'reconnect', 'integration_id' => 'facebook_ads'],
+                ['severity' => 'warning',  'message' => 'Facebook CAPI match rate is 62% — below the recommended 80%. Check customer email hashing.',                    'action_label' => 'Learn more',   'action_type' => 'docs',      'integration_id' => 'facebook_ads'],
+                ['severity' => 'info',     'message' => 'GSC data is delayed 48h by Google — last available data: 2026-04-27. This is normal and not a sync failure.',  'action_label' => null,           'action_type' => null,         'integration_id' => 'gsc'],
+            ],
+
+            // ── Tracking Health tab — Elevar Channel Accuracy Report ───────────
+            'accuracy' => [
+                'facebook' => 85.2,
+                'google'   => 97.8,
+                'gsc'      => 100.0,
+                'ga4'      => null,
+            ],
+
+            // ── Error code directory (Elevar pattern with sample payloads) ─────
+            'error_codes' => [
+                [
+                    'id'          => 1,
+                    'code'        => '#100',
+                    'destination' => 'facebook',
+                    'event'       => 'purchase',
+                    'first_seen'  => now()->subDays(3)->toISOString(),
+                    'last_seen'   => now()->subHours(3)->toISOString(),
+                    'count'       => 28,
+                    'explanation' => 'Missing user_data.em — customer email hash did not reach CAPI. Verify checkout extensibility installs the pixel on thank-you page.',
+                    'sample_payloads' => [
+                        ['error_code' => '#100', 'event_name' => 'purchase', 'user_data' => ['em' => null, 'ph' => 'abc123'], 'custom_data' => ['value' => 89.99, 'currency' => 'USD'], 'event_id' => 'SHP-10421-purchase'],
+                        ['error_code' => '#100', 'event_name' => 'purchase', 'user_data' => ['em' => null, 'ph' => null],     'custom_data' => ['value' => 45.00, 'currency' => 'USD'], 'event_id' => 'SHP-10438-purchase'],
+                    ],
+                ],
+                [
+                    'id'          => 2,
+                    'code'        => '#200',
+                    'destination' => 'facebook',
+                    'event'       => 'add_to_cart',
+                    'first_seen'  => now()->subDays(7)->toISOString(),
+                    'last_seen'   => now()->subHours(6)->toISOString(),
+                    'count'       => 14,
+                    'explanation' => 'Duplicate event_id — server-side and browser events are double-firing. Check deduplication key setup in Conversions API.',
+                    'sample_payloads' => [
+                        ['error_code' => '#200', 'event_name' => 'add_to_cart', 'event_id' => 'ATC-dupe-001', 'message' => 'Duplicate event received'],
+                    ],
+                ],
+                [
+                    'id'          => 3,
+                    'code'        => 'DATA_NOT_FOUND',
+                    'destination' => 'ga4',
+                    'event'       => 'purchase',
+                    'first_seen'  => now()->subDays(2)->toISOString(),
+                    'last_seen'   => now()->subHours(1)->toISOString(),
+                    'count'       => 89,
+                    'explanation' => 'GA4 Measurement Protocol returned DATA_NOT_FOUND. The purchase event is not reaching the property — tag likely broken after recent theme update.',
+                    'sample_payloads' => [
+                        ['error_code' => 'DATA_NOT_FOUND', 'measurement_id' => 'G-XXXXXXX', 'event_name' => 'purchase', 'response' => ['error' => ['code' => 404, 'message' => 'DATA_NOT_FOUND']]],
+                    ],
+                ],
+            ],
+
+            // ── Channel mapping (rendered via Channel Mapping tab) ────────────
+            'channel_mappings' => [],
+
+            // ── Historical imports ────────────────────────────────────────────
+            'import_jobs' => [],
+
+            // ── Phased unlock (Northbeam day-0/7/30/90 pattern) ──────────────
+            'phased_unlock' => [
+                'current_day' => (int) now()->diffInDays($workspace->created_at ?? now()),
+                'unlocks'     => [
+                    ['day' => 0,  'feature' => 'Dashboard & Orders',              'unlocked' => true],
+                    ['day' => 7,  'feature' => 'Attribution (Last-non-direct)',   'unlocked' => true],
+                    ['day' => 30, 'feature' => 'Cohort analysis',                 'unlocked' => false],
+                    ['day' => 90, 'feature' => 'LTV curves & predictive signals', 'unlocked' => false],
+                ],
+            ],
+        ]);
+    }
+
     public function show(Request $request): Response
     {
         $workspace   = Workspace::findOrFail(app(WorkspaceContext::class)->id());

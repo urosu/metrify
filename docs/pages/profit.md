@@ -24,7 +24,7 @@ One page that answers "what's left after I pay for goods, shipping, fees, and ad
 | Google Ads | same as Facebook | `ad_insights` filtered to platform=google | 15 min sync |
 | Store cost settings | yes | `store_cost_settings` + per-variant COGS on `order_line_items.cogs_amount`, shipping rules, transaction-fee rates, VAT table, OpEx allocation schedule | On write (inline-editable in Settings → Costs) |
 | Real (Nexstage-computed) | yes | `RevenueAttributionService` net-of-costs allocation; profit attributed to a source = its attributed revenue × blended gross margin − its proportional ad spend | Recomputed with SourceToggle / WindowSelector / AccountingModeSelector changes |
-| Site / GSC | no | Not relevant to profit; source badges shown as greyed/unavailable on MetricCards | — |
+| GA4 / GSC | no | Not relevant to profit; not shown on MetricCards on this page | — |
 
 COGS is applied at order-capture time and is **not retroactively updated** when product costs change — see `_crosscut_metric_dictionary.md` glossary "COGS".
 
@@ -120,7 +120,7 @@ BarChart "Profit by <Breakdown dimension>" (rendered only when BreakdownSelector
 
 LineChart "Profit over time" · multi-source overlay
   - GranularitySelector: Daily · Weekly · Monthly (default Weekly for ≥14d ranges)
-  - Lines: Real (solid gold), Store (slate), Facebook-attributed profit (indigo, dotted),
+  - Lines: Real (zinc, solid), Store (slate), Facebook-attributed profit (indigo, dotted),
     Google-attributed profit (amber, dotted) — platform-attributed profit = that source's
     attributed revenue × blended margin − that source's ad spend
   - TargetLine at monthly profit target; pacing variant shows on-pace dotted trend

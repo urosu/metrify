@@ -39,7 +39,9 @@ return new class extends Migration
             $table->index(['workspace_id', 'date']);
         });
 
-        DB::statement('CREATE UNIQUE INDEX gsc_pages_upsert_key ON gsc_pages (property_id, date, page_hash, device, country)');
+        // Index named with table prefix to avoid collision with the identically-named
+        // index on search_console_pages in 0001_01_02_000024_create_search_console_tables.php.
+        DB::statement('CREATE UNIQUE INDEX gsc_pages_table_upsert_key ON gsc_pages (property_id, date, page_hash, device, country)');
     }
 
     public function down(): void

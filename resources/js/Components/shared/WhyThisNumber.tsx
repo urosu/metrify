@@ -58,7 +58,7 @@ interface Props {
  *   - The formula used to compute the value
  *   - Source badges for the data sources involved
  *   - Raw input values that feed the formula
- *   - Platform conflicts (when platforms over-report vs Real)
+ *   - Platform measurement gaps (when platforms differ from Real)
  *   - Optional "View raw data" link to the admin query tool
  *
  * Callers pass a WhyThisNumberData object — the component owns the trigger
@@ -125,28 +125,36 @@ export function WhyThisNumber({ data }: Props) {
                     </div>
                 )}
 
-                {/* Platform conflicts */}
+                {/* Platform measurement gaps */}
                 {data.conflicts && data.conflicts.length > 0 && (
                     <div>
                         <p className="mb-1.5 th-label">
-                            Platform disagreements
+                            Platform measurements
                         </p>
                         <div className="space-y-1.5">
                             {data.conflicts.map((c, i) => (
                                 <div
                                     key={i}
-                                    className="rounded-lg border border-amber-100 bg-amber-50 px-3 py-2"
+                                    className="rounded-lg px-3 py-2"
+                                    style={{
+                                        border: '1px solid var(--border-subtle)',
+                                        backgroundColor: 'var(--color-surface-subtle)',
+                                    }}
                                 >
                                     <div className="flex items-center justify-between gap-2">
-                                        <span className="text-sm font-medium text-zinc-700">
+                                        <span className="text-sm font-medium"
+                                              style={{ color: 'var(--color-text)' }}>
                                             {c.platform} reports
                                         </span>
-                                        <span className="font-semibold tabular-nums text-amber-700">
+                                        <span className="font-semibold tabular-nums"
+                                              style={{ color: 'var(--color-text-secondary)' }}>
                                             {c.value}
                                         </span>
                                     </div>
                                     {c.note && (
-                                        <p className="mt-0.5 text-xs text-zinc-500">{c.note}</p>
+                                        <p className="mt-0.5 text-xs" style={{ color: 'var(--color-text-tertiary)' }}>
+                                            {c.note}
+                                        </p>
                                     )}
                                 </div>
                             ))}

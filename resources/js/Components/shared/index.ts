@@ -4,6 +4,8 @@ export type { ActionItem } from './IntegrationActionsMenu';
 export { ReimportDialog } from './ReimportDialog';
 export { AnalyticsTabBar } from './AnalyticsTabBar';
 export { DateRangePicker } from './DateRangePicker';
+export { DateCompareToolbar } from './DateCompareToolbar';
+export type { DateCompareToolbarProps } from './DateCompareToolbar';
 export { EmptyState } from './EmptyState';
 export { MetricCard } from './MetricCard';
 export type { MetricCardProps } from './MetricCard';

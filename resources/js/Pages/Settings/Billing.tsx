@@ -1,6 +1,6 @@
 import { Head, useForm, router, usePage } from '@inertiajs/react';
 import { useState } from 'react';
-import AppLayout from '@/Components/layouts/AppLayout';
+import { SettingsLayout } from '@/Components/layouts/SettingsLayout';
 import { PageHeader } from '@/Components/shared/PageHeader';
 import { formatDateOnly } from '@/lib/formatters';
 import { type PageProps } from '@/types';
@@ -410,7 +410,7 @@ export default function Billing({
     ];
 
     return (
-        <AppLayout>
+        <SettingsLayout>
             <Head title="Billing" />
 
             <PageHeader
@@ -835,6 +835,6 @@ export default function Billing({
                 )}
 
             </div>
-        </AppLayout>
+        </SettingsLayout>
     );
 }

@@ -24,7 +24,7 @@ One page that answers "who are my customers, how do they behave, and which group
 | Facebook Ads | no | `ad_insights` + `attribution_*` columns on orders for acquisition-channel breakdown of cohorts | 15 min sync |
 | Google Ads | no | Same as Facebook | 15 min sync |
 | Real (Nexstage-computed) | yes | `RevenueAttributionService` — source-attributed LTV, Predicted LTV, Predicted Next Order, Churn Risk. Model retrained weekly minimum (§5.28 SignalTypeBadge rules apply) | Nightly retrain; on-demand recompute on window change |
-| Site / GSC | no | Not used for customer lifecycle; badges greyed on MetricCards | — |
+| GA4 / GSC | no | Not used for customer lifecycle; not shown on MetricCards on this page | — |
 
 All data is filtered through `WorkspaceScope`. Predicted LTV and Churn Risk render with SignalTypeBadge "Modeled" (§5.28); users with <90 days of data see the AlertBanner "Modeled metrics are calibrating — 42 of 90 days".
 

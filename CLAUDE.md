@@ -15,9 +15,11 @@ Ecommerce analytics SaaS for WooCommerce and Shopify SMBs. Laravel 12 + Inertia 
 
 **Never invent a UX primitive or metric name.** If it's not in `docs/UX.md §5` or `docs/competitors/_crosscut_metric_dictionary.md`, don't use it.
 
-## Trust thesis (shapes every UI decision)
+## Source model
 
-Ad platforms disagree with the store database. Default view shows Real (the Nexstage-computed reconciliation); drill-down shows the disagreement via six source badges on every `MetricCard`: Store / Facebook / Google / GSC / Site / **Real** (gold lightbulb). "Not Tracked" is a first-class bucket and can go negative when platforms over-report. Never prefix metrics with "True" or "Real" as a sales claim — Hyros anti-pattern.
+Six canonical sources: **Store / Facebook / Google / GSC / GA4 / Real**. "Site" is not a source name — use GA4. Real is the Nexstage-computed reconciliation; it is displayed neutrally (no gold/amber chip). Source comparison is drill-only via popover — do not show a six-badge row on every MetricCard by default. "Not Tracked" is a first-class bucket and can go negative when platforms over-report. Never prefix metrics with "True" or "Real" as a sales claim — Hyros anti-pattern.
+
+Sidebar order: work pages on top (Dashboard, Orders, Products, Ads, Customers, Profit, SEO), Tools/Integrations/Settings on bottom, sync health in TopBar right cluster. Source/integration filters are in-content per `feedback_in_page_filters.md`; they do not live in the TopBar.
 
 ## Codebase map
 
@@ -28,8 +30,8 @@ Ad platforms disagree with the store database. Default view shows Real (the Nexs
 - `app/ValueObjects/` — plain PHP VOs (`ParsedAttribution`, `WorkspaceSettings`, `StoreCostSettings`)
 - `app/Models/` — Eloquent, tenant models use `#[ScopedBy(WorkspaceScope::class)]`
 - `resources/js/Pages/` — Inertia page components
-- `resources/js/Components/` — shared React components
-- `resources/js/Layouts/` — layout shells
+- `resources/js/Components/` — shared React components (`shared/`, `charts/`, `chrome/`, `layouts/`, `ui/`)
+- `resources/js/Components/layouts/` — layout shells (AppLayout, Sidebar, SettingsLayout, etc.) — there is no `resources/js/Layouts/` directory
 - `docs/` — all product specs, research, and planning
 
 ## Common commands

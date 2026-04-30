@@ -89,7 +89,7 @@ interface Props extends PageProps {
 // that matched, which is one of store / facebook / google / direct / other.
 function sourceBadgeFor(sourceType: string | null): { label: string; className: string } {
     if (!sourceType) {
-        return { label: 'Not Tracked', className: 'bg-zinc-100 text-zinc-600 border-zinc-200' };
+        return { label: 'Unattributed', className: 'bg-zinc-100 text-zinc-600 border-zinc-200' };
     }
     const map: Record<string, { label: string; className: string }> = {
         facebook_ads: { label: 'Facebook', className: 'bg-blue-50 text-blue-700 border-blue-200' },

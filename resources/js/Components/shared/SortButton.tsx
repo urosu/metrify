@@ -1,14 +1,17 @@
 import { cn } from '@/lib/utils';
+import type { ReactNode } from 'react';
 
 interface Props {
     col: string;
-    label: string;
+    /** Either pass `label` OR `children` for the visible header text. */
+    label?: ReactNode;
+    children?: ReactNode;
     currentSort: string;
     currentDir: 'asc' | 'desc';
     onSort: (col: string) => void;
 }
 
-export function SortButton({ col, label, currentSort, currentDir, onSort }: Props) {
+export function SortButton({ col, label, children, currentSort, currentDir, onSort }: Props) {
     const active = currentSort === col;
     return (
         <button
@@ -18,7 +21,7 @@ export function SortButton({ col, label, currentSort, currentDir, onSort }: Prop
                 active ? 'text-primary' : 'text-zinc-400',
             )}
         >
-            {label}
+            {label ?? children}
             {active && <span className="text-[10px]">{currentDir === 'desc' ? '↓' : '↑'}</span>}
         </button>
     );

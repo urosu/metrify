@@ -24,10 +24,10 @@ This is also the page where per-product COGS gets entered and corrected — the 
 | Source (UX §4 color) | Required? | Provenance | Freshness |
 |---|---|---|---|
 | Store (slate-500) | Yes | `daily_snapshot_products` aggregated from `order_items` joined to `products` / `product_variants`; COGS from `product_variants.cogs_amount` | Hourly rollup; inline COGS edits reflect within ~1min |
-| Real (yellow-400) | Yes | `RevenueAttributionService` resolves per-product attributed revenue across ad sources; used when ProfitMode flips the revenue column | Same as `/attribution` cadence |
+| Real (zinc-500) | Yes | `RevenueAttributionService` resolves per-product attributed revenue across ad sources; used when ProfitMode flips the revenue column | Same as `/attribution` cadence |
 | Facebook (indigo-500) | Optional | `ad_insights` joined to product via `campaigns.parsed_convention->>'product_sku'` | Hourly |
 | Google Ads (amber-500) | Optional | Same path as Facebook via `parsed_convention` | Hourly |
-| Site (violet-500) | Deferred | Product-level session data from first-party pixel | v2 |
+| GA4 (violet-500) | Deferred | Product-level session data from GA4 product-view events | v2 |
 | GSC (emerald-500) | N/A | Greyed on this page — not product-scoped |
 
 Notes on source behavior specific to this page:
@@ -138,7 +138,7 @@ Notes on source behavior specific to this page:
 
 - **Market Basket analysis with lift / confidence / support statistics.** The DrawerSidePanel shows co-occurrence count only. Full market-basket table, including cross-product bundle suggestions, is **deferred to v2** (Peel / Putler parity). Explicitly called out so users don't expect it.
 - **Inventory forecasting** (days-of-cover projection, reorder-point suggestions). `StatusDot` is a live snapshot only. Shopify Native and Metorik both ship forecasting; we don't in v1.
-- **Product-level first-party pixel / sessions / Add-to-Cart Rate.** Site source greyed until pixel ships (v2).
+- **Product-level GA4 sessions / Add-to-Cart Rate.** GA4 source deferred until GA4 product-view connector ships (v2).
 - **Category / collection hierarchy drill-down.** v1 renders category as a flat BarChart dimension, not an expandable tree.
 - **Product variant matrix view** (size × color × material analytics per SKU). Variants roll up into parent SKU row; v2 surfaces variant-level drilldown inside DrawerSidePanel.
 - **Auto-generated "products to kill / scale" prescriptions.** Lifecycle chips are rules-based and transparent; no AI prescriptive layer (anti-[Atria](../competitors/atria.md)).

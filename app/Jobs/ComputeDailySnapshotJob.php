@@ -184,9 +184,9 @@ class ComputeDailySnapshotJob implements ShouldQueue, ShouldBeUnique
                 'orders_count'        => $ordersCount,
                 'revenue'             => $revenue ?? 0,
                 'revenue_native'      => $revenueNative,
-                'aov'                 => $aov,
+                // aov = revenue / orders_count — computed at query-time, never stored.
+                // items_per_order = items_sold / orders_count — computed at query-time, never stored.
                 'items_sold'          => $itemsSold,
-                'items_per_order'     => $itemsPerOrder,
                 'new_customers'       => $newCustomers,
                 'returning_customers' => $returningCustomers,
                 'created_at'          => $now,
@@ -194,8 +194,8 @@ class ComputeDailySnapshotJob implements ShouldQueue, ShouldBeUnique
             ]],
             ['store_id', 'date'],
             [
-                'orders_count', 'revenue', 'revenue_native', 'aov',
-                'items_sold', 'items_per_order', 'new_customers', 'returning_customers',
+                'orders_count', 'revenue', 'revenue_native',
+                'items_sold', 'new_customers', 'returning_customers',
                 'updated_at',
             ],
         );

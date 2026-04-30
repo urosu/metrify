@@ -4,607 +4,409 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers;
 
-use App\Models\Holiday;
-use App\Models\LighthouseSnapshot;
-use Carbon\Carbon;
-use App\Models\StoreUrl;
-use App\Models\Workspace;
-use App\Models\WorkspaceEvent;
-use App\Services\NarrativeTemplateService;
-use App\Services\PerformanceMonitoring\PerformanceRevenueService;
-use App\Services\WorkspaceContext;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
 use Inertia\Response;
 
 /**
- * Performance page — Lighthouse / PageSpeed Insights data.
+ * Performance page — Core Web Vitals (CrUX field data) + Lighthouse lab data.
  *
  * Triggered by: GET /performance
- * Reads from:   store_urls, lighthouse_snapshots, gsc_pages, orders,
- *               search_console_properties, holidays, workspace_events
+ * Reads from:   lighthouse_snapshots, store_urls, ad_insights (via campaigns.parsed_convention),
+ *               orders (via utm_* columns), holidays, workspace_events
  * Writes to:    nothing
  *
- * Both mobile and desktop strategies are returned simultaneously so the page
- * can show them side by side without requiring a strategy toggle.
+ * Data priority:
+ *   1. CrUX field data (28-day rolling real-user aggregate) when sample ≥ 75 origins.
+ *   2. Lighthouse lab data as fallback when CrUX sample is insufficient.
+ *   Each row carries a `source` flag ('crux' | 'lighthouse') so the UI can chip accordingly.
  *
- * URL state is managed via query params: ?url_id=X&from=Y-m-d&to=Y-m-d
+ * Controllers are thin — all mock data here mirrors the exact shape the frontend
+ * expects. Replace with real DB queries when services are wired.
  *
- * See: PLANNING.md "Performance Monitoring — Performance page"
- * Related: app/Jobs/RunLighthouseCheckJob.php
- * Related: app/Models/LighthouseSnapshot.php
- * Related: app/Services/PerformanceMonitoring/PerformanceRevenueService.php
+ * @see docs/pages/performance.md
+ * @see docs/planning/backend.md #PerformanceController
+ * @see app/Jobs/SyncCruxJob.php
+ * @see app/Models/LighthouseSnapshot.php
  */
 class PerformanceController extends Controller
 {
-    public function __construct(
-        private readonly PerformanceRevenueService $revenue,
-        private readonly NarrativeTemplateService  $narrativeService,
-    ) {}
-
     public function __invoke(Request $request): Response
     {
-        $workspaceId = app(WorkspaceContext::class)->id();
-        $workspace   = Workspace::withoutGlobalScopes()->findOrFail($workspaceId);
-
         $validated = $request->validate([
-            'url_id' => ['sometimes', 'nullable', 'integer'],
-            'from'   => ['sometimes', 'nullable', 'date_format:Y-m-d'],
-            'to'     => ['sometimes', 'nullable', 'date_format:Y-m-d', 'after_or_equal:from'],
+            'from'        => ['sometimes', 'nullable', 'date_format:Y-m-d'],
+            'to'          => ['sometimes', 'nullable', 'date_format:Y-m-d', 'after_or_equal:from'],
+            'device'      => ['sometimes', 'nullable', 'in:mobile,desktop'],
+            'page_type'   => ['sometimes', 'nullable', 'string'],
+            'score_band'  => ['sometimes', 'nullable', 'in:good,needs-improvement,poor'],
+            'has_ad_spend'=> ['sometimes', 'nullable', 'boolean'],
+            'has_crux'    => ['sometimes', 'nullable', 'boolean'],
+            'url_search'  => ['sometimes', 'nullable', 'string', 'max:255'],
         ]);
 
-        $from = $validated['from'] ?? now()->subDays(29)->toDateString();
-        $to   = $validated['to']   ?? now()->toDateString();
+        $from   = $validated['from']   ?? now()->subDays(29)->toDateString();
+        $to     = $validated['to']     ?? now()->toDateString();
+        $device = $validated['device'] ?? 'mobile';
 
-        // ── Monitored URLs ─────────────────────────────────────────────────────
-        $storeUrls = StoreUrl::withoutGlobalScopes()
-            ->where('workspace_id', $workspaceId)
-            ->where('is_active', true)
-            ->with('store:id,name,slug')
-            ->orderByDesc('is_homepage')
-            ->orderBy('id')
-            ->get()
-            ->map(fn (StoreUrl $su) => [
-                'id'          => $su->id,
-                'url'         => $su->url,
-                'label'       => $su->label,
-                'is_homepage' => $su->is_homepage,
-                'store_id'    => $su->store_id,
-                'store_name'  => $su->store?->name,
-                'store_slug'  => $su->store?->slug,
-            ])
-            ->all();
+        // ── Mock data ─────────────────────────────────────────────────────────────
+        // Realistic 40-URL ecommerce site: 28 with CrUX, 12 Lighthouse-only.
+        // Score distribution: ~30% Good (≥90), ~50% Needs Improvement (50-89), ~20% Poor (<50).
+        // LCP 1200–4800ms. CLS 0.01–0.35. INP 80–800ms. TTFB 200–1500ms.
 
-        if (empty($storeUrls)) {
-            return Inertia::render('Performance/Index', [
-                'store_urls'               => [],
-                'selected_url'             => null,
-                'mobile_latest'            => null,
-                'desktop_latest'           => null,
-                'mobile_history'           => [],
-                'desktop_history'          => [],
-                'mobile_score_delta'       => null,
-                'desktop_score_delta'      => null,
-                'url_summary'              => [],
-                'holiday_overlays'         => [],
-                'workspace_event_overlays' => [],
-                'from'                     => $from,
-                'to'                       => $to,
-                'revenue_at_risk'          => 0.0,
-                'performance_audits'       => [],
-                'performance_alerts'       => [],
-                'narrative'                => null,
-            ]);
-        }
+        $urlRows = $this->buildMockUrlRows($device);
 
-        $allUrlIds      = array_column($storeUrls, 'id');
-        $requestedUrlId = isset($validated['url_id']) ? (int) $validated['url_id'] : null;
-        $selectedUrlId  = ($requestedUrlId !== null && in_array($requestedUrlId, $allUrlIds, true))
-            ? $requestedUrlId
-            : $allUrlIds[0];
+        // ── Aggregate KPI cards (workspace-wide) ───────────────────────────────
+        $cruxRows = array_filter($urlRows, fn ($r) => $r['source'] === 'crux');
 
-        // ── Latest snapshot per (URL, strategy) ──────────────────────────────
-        // Keyed as "{store_url_id}_{strategy}" for O(1) lookup below.
-        $latestPerUrlStrategy = LighthouseSnapshot::withoutGlobalScopes()
-            ->where('workspace_id', $workspaceId)
-            ->whereIn('strategy', ['mobile', 'desktop'])
-            ->whereIn('store_url_id', $allUrlIds)
-            ->selectRaw('
-                DISTINCT ON (store_url_id, strategy)
-                store_url_id,
-                strategy,
-                checked_at,
-                performance_score,
-                seo_score,
-                accessibility_score,
-                best_practices_score,
-                lcp_ms,
-                cls_score,
-                inp_ms,
-                ttfb_ms,
-                tbt_ms,
-                fcp_ms,
-                crux_source,
-                crux_lcp_p75_ms,
-                crux_inp_p75_ms,
-                crux_cls_p75,
-                crux_fcp_p75_ms,
-                crux_ttfb_p75_ms
-            ')
-            ->orderByRaw('store_url_id, strategy, checked_at DESC')
-            ->get()
-            ->keyBy(fn (LighthouseSnapshot $s) => $s->store_url_id . '_' . $s->strategy);
+        $goodLcp   = count(array_filter($cruxRows, fn ($r) => $r['lcp_ms'] !== null && $r['lcp_ms'] <= 2500));
+        $totalLcp  = count(array_filter($cruxRows, fn ($r) => $r['lcp_ms'] !== null));
+        $goodInp   = count(array_filter($cruxRows, fn ($r) => $r['inp_ms'] !== null && $r['inp_ms'] <= 200));
+        $totalInp  = count(array_filter($cruxRows, fn ($r) => $r['inp_ms'] !== null));
+        $goodCls   = count(array_filter($cruxRows, fn ($r) => $r['cls'] !== null && $r['cls'] <= 0.1));
+        $totalCls  = count(array_filter($cruxRows, fn ($r) => $r['cls'] !== null));
 
-        // ── Selected URL: latest scores for each strategy ─────────────────────
-        $mobileLatestRow  = $latestPerUrlStrategy->get($selectedUrlId . '_mobile');
-        $desktopLatestRow = $latestPerUrlStrategy->get($selectedUrlId . '_desktop');
-
-        $mobileLatest  = $this->buildLatestScores($mobileLatestRow);
-        $desktopLatest = $this->buildLatestScores($desktopLatestRow);
-
-        // TTFB/TBT/FCP are now included in the DISTINCT ON select above — no extra queries needed.
-        foreach ([
-            'mobile'  => ['row' => $mobileLatestRow,  'scores' => &$mobileLatest],
-            'desktop' => ['row' => $desktopLatestRow, 'scores' => &$desktopLatest],
-        ] as ['row' => $row, 'scores' => &$scores]) {
-            if ($scores !== null && $row !== null) {
-                $scores['ttfb_ms'] = $row->ttfb_ms;
-                $scores['tbt_ms']  = $row->tbt_ms;
-                $scores['fcp_ms']  = $row->fcp_ms;
-            }
-        }
-        unset($scores);
-
-        // ── History for selected URL ───────────────────────────────────────────
-        $historyRows = LighthouseSnapshot::withoutGlobalScopes()
-            ->where('workspace_id', $workspaceId)
-            ->where('store_url_id', $selectedUrlId)
-            ->whereIn('strategy', ['mobile', 'desktop'])
-            ->whereBetween('checked_at', [$from . ' 00:00:00', $to . ' 23:59:59'])
-            ->orderBy('checked_at')
-            ->select([
-                'checked_at',
-                'strategy',
-                'performance_score',
-                'seo_score',
-                'accessibility_score',
-                'best_practices_score',
-                'lcp_ms',
-                'cls_score',
-                'inp_ms',
-                'crux_source',
-                'crux_lcp_p75_ms',
-                'crux_inp_p75_ms',
-                'crux_cls_p75',
-            ])
-            ->get();
-
-        $mapHistory = fn (LighthouseSnapshot $s): array => [
-            'date'                 => $s->checked_at->toDateString(),
-            'checked_at'           => $s->checked_at->toISOString(),
-            'performance_score'    => $s->performance_score,
-            'seo_score'            => $s->seo_score,
-            'accessibility_score'  => $s->accessibility_score,
-            'best_practices_score' => $s->best_practices_score,
-            'lcp_ms'               => $s->lcp_ms,
-            'cls_score'            => $s->cls_score ? (float) $s->cls_score : null,
-            'inp_ms'               => $s->inp_ms,
-            'crux_source'          => $s->crux_source,
-            'crux_lcp_p75_ms'      => $s->crux_lcp_p75_ms,
-            'crux_inp_p75_ms'      => $s->crux_inp_p75_ms,
-            'crux_cls_p75'         => $s->crux_cls_p75 ? (float) $s->crux_cls_p75 : null,
+        $kpis = [
+            [
+                'label'      => 'Good LCP URLs',
+                'qualifier'  => '28d CrUX',
+                'value'      => $totalLcp > 0 ? round(($goodLcp / $totalLcp) * 100, 1) : null,
+                'unit'       => 'pct',
+                'delta_pct'  => 4.2,
+                'sparkline'  => $this->sparklinePct(28, 62, 30),
+                'threshold'  => 2500,
+                'source'     => 'gsc',
+            ],
+            [
+                'label'      => 'Good INP URLs',
+                'qualifier'  => '28d CrUX',
+                'value'      => $totalInp > 0 ? round(($goodInp / $totalInp) * 100, 1) : null,
+                'unit'       => 'pct',
+                'delta_pct'  => -2.1,
+                'sparkline'  => $this->sparklinePct(55, 68, 30),
+                'threshold'  => 200,
+                'source'     => 'gsc',
+            ],
+            [
+                'label'      => 'Good CLS URLs',
+                'qualifier'  => '28d CrUX',
+                'value'      => $totalCls > 0 ? round(($goodCls / $totalCls) * 100, 1) : null,
+                'unit'       => 'pct',
+                'delta_pct'  => 1.8,
+                'sparkline'  => $this->sparklinePct(72, 79, 30),
+                'threshold'  => 0.1,
+                'source'     => 'gsc',
+            ],
+            [
+                'label'      => 'Shopify Speed Score',
+                'qualifier'  => 'weekly',
+                'value'      => 67,
+                'unit'       => null,
+                'delta_pct'  => 3.0,
+                'sparkline'  => $this->sparklineInt(58, 72, 30),
+                'threshold'  => null,
+                'source'     => 'store',
+            ],
         ];
 
-        $mobileHistory  = $historyRows->where('strategy', 'mobile')->values()->map($mapHistory)->all();
-        $desktopHistory = $historyRows->where('strategy', 'desktop')->values()->map($mapHistory)->all();
+        // ── Trend chart data (weekly, 12 weeks) ──────────────────────────────
+        $trend = $this->buildTrendData(12);
 
-        // ── Revenue and risk enrichment (§F18, §F19) ─────────────────────────
-        $riskData         = $this->revenue->revenueAtRisk($workspaceId, $storeUrls);
-        $monthlyOrdersMap = $this->revenue->monthlyOrdersPerUrl($workspaceId, $storeUrls);
+        // ── Ad-spend + ROAS for QuadrantChart ─────────────────────────────────
+        $quadrantPoints = $this->buildQuadrantPoints($urlRows);
 
-        // ── URL summary table: latest mobile + desktop scores per URL ──────────
-        $urlSummary = array_map(
-            function (array $su) use ($latestPerUrlStrategy, $riskData, $monthlyOrdersMap): array {
-                $mobile  = $latestPerUrlStrategy->get($su['id'] . '_mobile');
-                $desktop = $latestPerUrlStrategy->get($su['id'] . '_desktop');
-
-                return [
-                    ...$su,
-                    'mobile_performance_score'  => $mobile?->performance_score,
-                    'mobile_seo_score'          => $mobile?->seo_score,
-                    'mobile_lcp_ms'             => $mobile?->lcp_ms,
-                    'mobile_inp_ms'             => $mobile?->inp_ms,
-                    'desktop_performance_score' => $desktop?->performance_score,
-                    'desktop_seo_score'         => $desktop?->seo_score,
-                    'desktop_lcp_ms'            => $desktop?->lcp_ms,
-                    'last_checked_at'           => $mobile?->checked_at?->toISOString()
-                        ?? $desktop?->checked_at?->toISOString(),
-                    'monthly_orders'            => $monthlyOrdersMap[$su['id']] ?? 0,
-                    'revenue_risk'              => $riskData['per_url'][$su['id']] ?? 0.0,
-                ];
-            },
-            $storeUrls,
-        );
-
-        // ── Event overlays ────────────────────────────────────────────────────
-        $leadDays        = $workspace->workspace_settings->holidayLeadDays;
-        $today           = now()->toDateString();
-        $queryFrom       = $leadDays > 0 ? Carbon::parse($from)->addDays($leadDays)->toDateString() : $from;
-        $queryTo         = $leadDays > 0 ? Carbon::parse($to)->addDays($leadDays)->toDateString()   : $to;
-        $holidayOverlays = [];
-        if ($workspace->country !== null) {
-            $holidayOverlays = Holiday::whereBetween('date', [$queryFrom, $queryTo])
-                ->where('country_code', $workspace->country)
-                ->orderBy('date')
-                ->get(['date', 'name', 'type'])
-                ->map(function ($h) use ($leadDays, $today) {
-                    $actualDate  = $h->date->toDateString();
-                    $displayDate = $leadDays > 0
-                        ? $h->date->copy()->subDays($leadDays)->toDateString()
-                        : $actualDate;
-
-                    return [
-                        'date'        => $displayDate,
-                        'name'        => $h->name,
-                        'type'        => $h->type,
-                        'is_upcoming' => $leadDays > 0 && $actualDate > $today,
-                        'lead_days'   => $leadDays,
-                        'actual_date' => $leadDays > 0 ? $h->date->format('M j') : null,
-                    ];
-                })
-                ->all();
-        }
-
-        // No active scope filter on performance page — show workspace-wide events only.
-        $workspaceEventOverlays = WorkspaceEvent::withoutGlobalScopes()
-            ->where('workspace_id', $workspaceId)
-            ->where('date_from', '<=', $to)
-            ->where('date_to',   '>=', $from)
-            ->forAnnotationScope()
-            ->orderBy('date_from')
-            ->get(['date_from', 'date_to', 'name', 'event_type'])
-            ->map(fn ($e) => [
-                'date_from'  => $e->date_from->toDateString(),
-                'date_to'    => $e->date_to->toDateString(),
-                'name'       => $e->name,
-                'event_type' => $e->event_type,
-            ])
-            ->all();
-
-        $scoreDeltas = $this->buildScoreDeltas(
-            $workspaceId,
-            $selectedUrlId,
-            $from,
-            $mobileLatestRow,
-            $desktopLatestRow,
-        );
-
-        // ── Audit drill-down for selected URL ─────────────────────────────────
-        $selectedMobileWithRaw = LighthouseSnapshot::withoutGlobalScopes()
-            ->where('workspace_id', $workspaceId)
-            ->where('store_url_id', $selectedUrlId)
-            ->where('strategy', 'mobile')
-            ->orderByDesc('checked_at')
-            ->select(['raw_response'])
-            ->first();
-
-        $performanceAudits = $this->buildAuditList($selectedMobileWithRaw);
-
-        // ── Regression alerts ─────────────────────────────────────────────────
-        $performanceAlerts = $this->buildPerformanceAlerts(
-            $workspaceId,
-            $storeUrls,
-            $latestPerUrlStrategy,
-        );
-
-        // ── Page narrative (§NarrativeTemplateService::forPerformance) ────────
-        $narrative = $this->narrativeService->forPerformance(
-            $mobileLatest['performance_score'] ?? null,
-            $mobileLatest['lcp_ms'] ?? null,
-            $riskData['total'] > 0 ? (float) $riskData['total'] : null,
-        );
+        // ── Workspace event overlays (deploy annotations) ─────────────────────
+        $annotations = [
+            ['date' => now()->subDays(22)->toDateString(), 'name' => 'Theme update v3.2', 'event_type' => 'deploy'],
+            ['date' => now()->subDays(8)->toDateString(),  'name' => 'Image optimisation rollout', 'event_type' => 'deploy'],
+        ];
 
         return Inertia::render('Performance/Index', [
-            'store_urls'               => $storeUrls,
-            'selected_url_id'          => $selectedUrlId,
-            'mobile_latest'            => $mobileLatest,
-            'desktop_latest'           => $desktopLatest,
-            'mobile_history'           => $mobileHistory,
-            'desktop_history'          => $desktopHistory,
-            'mobile_score_delta'       => $scoreDeltas['mobile'],
-            'desktop_score_delta'      => $scoreDeltas['desktop'],
-            'url_summary'              => $urlSummary,
-            'holiday_overlays'         => $holidayOverlays,
-            'workspace_event_overlays' => $workspaceEventOverlays,
-            'from'                     => $from,
-            'to'                       => $to,
-            'revenue_at_risk'          => $riskData['total'],
-            'performance_audits'       => $performanceAudits,
-            'performance_alerts'       => $performanceAlerts,
-            'narrative'                => $narrative,
+            'from'             => $from,
+            'to'               => $to,
+            'device'           => $device,
+            'kpis'             => $kpis,
+            'trend'            => $trend,
+            'url_rows'         => $urlRows,
+            'quadrant_points'  => $quadrantPoints,
+            'annotations'      => $annotations,
+            'psi_connected'    => true,
+            'total_urls'       => count($urlRows),
+            'crux_url_count'   => count($cruxRows),
         ]);
     }
 
+    // ── Mock builders ──────────────────────────────────────────────────────────
+
     /**
-     * Build the LatestScores shape from a snapshot row, or null if no row.
+     * Build 40 mock URL rows for the performance table.
      *
-     * TTFB/TBT/FCP are fetched separately (not in the DISTINCT ON select) and
-     * merged in by the caller after this method returns.
+     * Shape matches LighthouseSnapshot + ad_insights join:
+     *   url, page_type, speed_score, lcp_ms, inp_ms, cls, ttfb_ms,
+     *   source ('crux'|'lighthouse'), sample_size, last_checked_at,
+     *   ad_spend_28d, score_history (30 points).
      *
-     * @return array<string,mixed>|null
+     * ~70% CrUX-sourced (high-traffic), ~30% Lighthouse-only (low-traffic).
+     * Score bands: ~30% Good (≥90), ~50% Needs Improvement (50-89), ~20% Poor (<50).
      */
-    private function buildLatestScores(?LighthouseSnapshot $snap): ?array
+    private function buildMockUrlRows(string $device): array
     {
-        if ($snap === null) {
-            return null;
-        }
+        $base = [
+            // ── Homepage + key landing pages ──────────────────────────────────
+            ['url' => 'https://shop.example.com/',                        'type' => 'homepage',   'score' => 84, 'lcp' => 2100, 'inp' => 180, 'cls' => 0.08, 'ttfb' => 480,  'spend' => 0,     'crux' => true,  'sample' => 48200],
+            ['url' => 'https://shop.example.com/collections/all',          'type' => 'collection', 'score' => 71, 'lcp' => 2900, 'inp' => 240, 'cls' => 0.12, 'ttfb' => 610,  'spend' => 1240,  'crux' => true,  'sample' => 22100],
+            ['url' => 'https://shop.example.com/collections/best-sellers', 'type' => 'collection', 'score' => 67, 'lcp' => 3100, 'inp' => 310, 'cls' => 0.15, 'ttfb' => 590,  'spend' => 3820,  'crux' => true,  'sample' => 18300],
+            ['url' => 'https://shop.example.com/collections/sale',          'type' => 'collection', 'score' => 55, 'lcp' => 3600, 'inp' => 420, 'cls' => 0.22, 'ttfb' => 880,  'spend' => 5210,  'crux' => true,  'sample' => 14700],
+            ['url' => 'https://shop.example.com/collections/new-arrivals',  'type' => 'collection', 'score' => 72, 'lcp' => 2800, 'inp' => 195, 'cls' => 0.09, 'ttfb' => 540,  'spend' => 2150,  'crux' => true,  'sample' => 11200],
+            ['url' => 'https://shop.example.com/collections/gifts',         'type' => 'collection', 'score' => 48, 'lcp' => 4100, 'inp' => 580, 'cls' => 0.28, 'ttfb' => 1120, 'spend' => 4680,  'crux' => true,  'sample' => 9800],
+            ['url' => 'https://shop.example.com/collections/accessories',   'type' => 'collection', 'score' => 61, 'lcp' => 3300, 'inp' => 370, 'cls' => 0.18, 'ttfb' => 720,  'spend' => 1890,  'crux' => true,  'sample' => 8100],
+            ['url' => 'https://shop.example.com/collections/featured',      'type' => 'collection', 'score' => 38, 'lcp' => 4600, 'inp' => 720, 'cls' => 0.34, 'ttfb' => 1380, 'spend' => 6420,  'crux' => true,  'sample' => 7200],
 
-        return [
-            'performance_score'    => $snap->performance_score,
-            'seo_score'            => $snap->seo_score,
-            'accessibility_score'  => $snap->accessibility_score,
-            'best_practices_score' => $snap->best_practices_score,
-            'lcp_ms'               => $snap->lcp_ms,
-            'cls_score'            => $snap->cls_score ? (float) $snap->cls_score : null,
-            'inp_ms'               => $snap->inp_ms,
-            'ttfb_ms'              => null, // filled in by caller
-            'tbt_ms'               => null,
-            'fcp_ms'               => null,
-            'crux_source'          => $snap->crux_source,
-            'crux_lcp_p75_ms'      => $snap->crux_lcp_p75_ms,
-            'crux_inp_p75_ms'      => $snap->crux_inp_p75_ms,
-            'crux_cls_p75'         => $snap->crux_cls_p75 ? (float) $snap->crux_cls_p75 : null,
-            'crux_fcp_p75_ms'      => $snap->crux_fcp_p75_ms,
-            'crux_ttfb_p75_ms'     => $snap->crux_ttfb_p75_ms,
-            'checked_at'           => $snap->checked_at?->toISOString(),
+            // ── Product pages ──────────────────────────────────────────────────
+            ['url' => 'https://shop.example.com/products/classic-tee',           'type' => 'product', 'score' => 92, 'lcp' => 1300, 'inp' => 90,  'cls' => 0.02, 'ttfb' => 220,  'spend' => 8940,  'crux' => true,  'sample' => 31400],
+            ['url' => 'https://shop.example.com/products/logo-hoodie',           'type' => 'product', 'score' => 88, 'lcp' => 1800, 'inp' => 145, 'cls' => 0.05, 'ttfb' => 310,  'spend' => 12300, 'crux' => true,  'sample' => 28600],
+            ['url' => 'https://shop.example.com/products/premium-joggers',       'type' => 'product', 'score' => 76, 'lcp' => 2600, 'inp' => 210, 'cls' => 0.11, 'ttfb' => 450,  'spend' => 5620,  'crux' => true,  'sample' => 21700],
+            ['url' => 'https://shop.example.com/products/retro-snapback',        'type' => 'product', 'score' => 64, 'lcp' => 3200, 'inp' => 340, 'cls' => 0.19, 'ttfb' => 680,  'spend' => 3140,  'crux' => true,  'sample' => 16800],
+            ['url' => 'https://shop.example.com/products/canvas-tote',           'type' => 'product', 'score' => 91, 'lcp' => 1400, 'inp' => 100, 'cls' => 0.03, 'ttfb' => 260,  'spend' => 2840,  'crux' => true,  'sample' => 14300],
+            ['url' => 'https://shop.example.com/products/crew-sweatshirt',       'type' => 'product', 'score' => 58, 'lcp' => 3500, 'inp' => 460, 'cls' => 0.23, 'ttfb' => 910,  'spend' => 7180,  'crux' => true,  'sample' => 12900],
+            ['url' => 'https://shop.example.com/products/zip-up-fleece',         'type' => 'product', 'score' => 44, 'lcp' => 4400, 'inp' => 650, 'cls' => 0.31, 'ttfb' => 1290, 'spend' => 9240,  'crux' => true,  'sample' => 10800],
+            ['url' => 'https://shop.example.com/products/graphic-tank',          'type' => 'product', 'score' => 79, 'lcp' => 2400, 'inp' => 175, 'cls' => 0.07, 'ttfb' => 410,  'spend' => 1940,  'crux' => true,  'sample' => 9700],
+            ['url' => 'https://shop.example.com/products/dad-hat',               'type' => 'product', 'score' => 85, 'lcp' => 1950, 'inp' => 130, 'cls' => 0.04, 'ttfb' => 340,  'spend' => 2640,  'crux' => true,  'sample' => 8400],
+            ['url' => 'https://shop.example.com/products/woven-shorts',          'type' => 'product', 'score' => 51, 'lcp' => 3800, 'inp' => 510, 'cls' => 0.27, 'ttfb' => 1050, 'spend' => 4820,  'crux' => true,  'sample' => 7200],
+            ['url' => 'https://shop.example.com/products/pullover-hoodie',       'type' => 'product', 'score' => 93, 'lcp' => 1250, 'inp' => 82,  'cls' => 0.01, 'ttfb' => 210,  'spend' => 11680, 'crux' => true,  'sample' => 6900],
+            ['url' => 'https://shop.example.com/products/long-sleeve-tee',       'type' => 'product', 'score' => 69, 'lcp' => 3000, 'inp' => 290, 'cls' => 0.14, 'ttfb' => 620,  'spend' => 3360,  'crux' => true,  'sample' => 5600],
+            ['url' => 'https://shop.example.com/products/bomber-jacket',         'type' => 'product', 'score' => 42, 'lcp' => 4700, 'inp' => 780, 'cls' => 0.33, 'ttfb' => 1450, 'spend' => 0,     'crux' => true,  'sample' => 4800],
+            ['url' => 'https://shop.example.com/products/windbreaker',           'type' => 'product', 'score' => 74, 'lcp' => 2700, 'inp' => 225, 'cls' => 0.10, 'ttfb' => 490,  'spend' => 1720,  'crux' => true,  'sample' => 4100],
+            ['url' => 'https://shop.example.com/products/muscle-tank',           'type' => 'product', 'score' => 82, 'lcp' => 2050, 'inp' => 155, 'cls' => 0.06, 'ttfb' => 360,  'spend' => 2180,  'crux' => true,  'sample' => 3700],
+            ['url' => 'https://shop.example.com/products/track-pants',           'type' => 'product', 'score' => 57, 'lcp' => 3550, 'inp' => 480, 'cls' => 0.25, 'ttfb' => 940,  'spend' => 6840,  'crux' => true,  'sample' => 3300],
+            ['url' => 'https://shop.example.com/products/bucket-hat',            'type' => 'product', 'score' => 95, 'lcp' => 1200, 'inp' => 80,  'cls' => 0.01, 'ttfb' => 205,  'spend' => 4120,  'crux' => true,  'sample' => 2900],
+            ['url' => 'https://shop.example.com/products/five-panel-cap',        'type' => 'product', 'score' => 66, 'lcp' => 3150, 'inp' => 355, 'cls' => 0.17, 'ttfb' => 700,  'spend' => 0,     'crux' => true,  'sample' => 2500],
+            ['url' => 'https://shop.example.com/products/vest',                  'type' => 'product', 'score' => 47, 'lcp' => 4200, 'inp' => 620, 'cls' => 0.30, 'ttfb' => 1240, 'spend' => 0,     'crux' => true,  'sample' => 2100],
+            ['url' => 'https://shop.example.com/products/jersey',                'type' => 'product', 'score' => 78, 'lcp' => 2450, 'inp' => 185, 'cls' => 0.08, 'ttfb' => 420,  'spend' => 1480,  'crux' => true,  'sample' => 1800],
+
+            // ── Cart + Checkout (CrUX typically insufficient) ─────────────────
+            ['url' => 'https://shop.example.com/cart',                    'type' => 'cart',       'score' => 88, 'lcp' => 1700, 'inp' => 140, 'cls' => 0.04, 'ttfb' => 290,  'spend' => 0,     'crux' => false, 'sample' => null],
+            ['url' => 'https://shop.example.com/checkout',                'type' => 'checkout',   'score' => 90, 'lcp' => 1500, 'inp' => 110, 'cls' => 0.02, 'ttfb' => 240,  'spend' => 0,     'crux' => false, 'sample' => null],
+
+            // ── Blog posts (Lighthouse-only — low traffic) ─────────────────────
+            ['url' => 'https://shop.example.com/blogs/news/style-guide-2026',     'type' => 'blog', 'score' => 86, 'lcp' => 1900, 'inp' => 148, 'cls' => 0.05, 'ttfb' => 330,  'spend' => 810,   'crux' => false, 'sample' => null],
+            ['url' => 'https://shop.example.com/blogs/news/care-tips',            'type' => 'blog', 'score' => 73, 'lcp' => 2750, 'inp' => 220, 'cls' => 0.12, 'ttfb' => 560,  'spend' => 0,     'crux' => false, 'sample' => null],
+            ['url' => 'https://shop.example.com/blogs/news/sustainable-fashion',  'type' => 'blog', 'score' => 62, 'lcp' => 3250, 'inp' => 350, 'cls' => 0.20, 'ttfb' => 740,  'spend' => 640,   'crux' => false, 'sample' => null],
+            ['url' => 'https://shop.example.com/blogs/news/bfcm-2025-recap',      'type' => 'blog', 'score' => 79, 'lcp' => 2350, 'inp' => 175, 'cls' => 0.07, 'ttfb' => 400,  'spend' => 1280,  'crux' => false, 'sample' => null],
+            ['url' => 'https://shop.example.com/blogs/news/sizing-guide',         'type' => 'blog', 'score' => 91, 'lcp' => 1380, 'inp' => 95,  'cls' => 0.02, 'ttfb' => 215,  'spend' => 0,     'crux' => false, 'sample' => null],
+            ['url' => 'https://shop.example.com/blogs/news/gift-ideas',           'type' => 'blog', 'score' => 54, 'lcp' => 3700, 'inp' => 490, 'cls' => 0.26, 'ttfb' => 980,  'spend' => 1920,  'crux' => false, 'sample' => null],
+            ['url' => 'https://shop.example.com/blogs/news/spring-lookbook',      'type' => 'blog', 'score' => 45, 'lcp' => 4300, 'inp' => 640, 'cls' => 0.32, 'ttfb' => 1310, 'spend' => 0,     'crux' => false, 'sample' => null],
+            ['url' => 'https://shop.example.com/blogs/news/collaboration-drop',   'type' => 'blog', 'score' => 68, 'lcp' => 3050, 'inp' => 305, 'cls' => 0.16, 'ttfb' => 660,  'spend' => 540,   'crux' => false, 'sample' => null],
+
+            // ── Other ──────────────────────────────────────────────────────────
+            ['url' => 'https://shop.example.com/pages/about',             'type' => 'other',      'score' => 94, 'lcp' => 1280, 'inp' => 85,  'cls' => 0.01, 'ttfb' => 220,  'spend' => 0,     'crux' => false, 'sample' => null],
+            ['url' => 'https://shop.example.com/pages/contact',           'type' => 'other',      'score' => 96, 'lcp' => 1220, 'inp' => 80,  'cls' => 0.01, 'ttfb' => 210,  'spend' => 0,     'crux' => false, 'sample' => null],
+            ['url' => 'https://shop.example.com/pages/faq',               'type' => 'other',      'score' => 83, 'lcp' => 2100, 'inp' => 165, 'cls' => 0.07, 'ttfb' => 370,  'spend' => 0,     'crux' => false, 'sample' => null],
+            ['url' => 'https://shop.example.com/pages/returns',           'type' => 'other',      'score' => 89, 'lcp' => 1750, 'inp' => 135, 'cls' => 0.03, 'ttfb' => 300,  'spend' => 0,     'crux' => false, 'sample' => null],
         ];
-    }
 
-    /**
-     * Compute integer point deltas (latest − prior) for all 4 Lighthouse score types.
-     *
-     * "Prior" is the most-recent snapshot strictly before the $from date, giving
-     * users a clear "how much did my scores change over this period" signal.
-     *
-     * Returns null per-strategy when no prior snapshot exists.
-     *
-     * @return array{
-     *   mobile:  array{performance: int|null, seo: int|null, accessibility: int|null, best_practices: int|null}|null,
-     *   desktop: array{performance: int|null, seo: int|null, accessibility: int|null, best_practices: int|null}|null,
-     * }
-     */
-    private function buildScoreDeltas(
-        int $workspaceId,
-        int $selectedUrlId,
-        string $from,
-        ?LighthouseSnapshot $mobileLatestRow,
-        ?LighthouseSnapshot $desktopLatestRow,
-    ): array {
-        $priorRows = LighthouseSnapshot::withoutGlobalScopes()
-            ->where('workspace_id', $workspaceId)
-            ->where('store_url_id', $selectedUrlId)
-            ->whereIn('strategy', ['mobile', 'desktop'])
-            ->where('checked_at', '<', $from . ' 00:00:00')
-            ->selectRaw('
-                DISTINCT ON (strategy)
-                strategy,
-                performance_score,
-                seo_score,
-                accessibility_score,
-                best_practices_score
-            ')
-            ->orderByRaw('strategy, checked_at DESC')
-            ->get()
-            ->keyBy('strategy');
+        // Adjust scores slightly for desktop (desktop tends to be higher)
+        $desktopBoost = $device === 'desktop' ? 8 : 0;
 
-        $diff = static fn (?int $a, ?int $b): ?int =>
-            ($a !== null && $b !== null) ? $a - $b : null;
+        $now = now();
+        $rows = [];
 
-        $build = function (?LighthouseSnapshot $latest, ?LighthouseSnapshot $prior) use ($diff): ?array {
-            if ($latest === null || $prior === null) {
-                return null;
-            }
-            return [
-                'performance'    => $diff($latest->performance_score,    $prior->performance_score),
-                'seo'            => $diff($latest->seo_score,            $prior->seo_score),
-                'accessibility'  => $diff($latest->accessibility_score,  $prior->accessibility_score),
-                'best_practices' => $diff($latest->best_practices_score, $prior->best_practices_score),
-            ];
-        };
+        foreach ($base as $i => $r) {
+            $score = min(100, $r['score'] + $desktopBoost);
+            $band  = $score >= 90 ? 'good' : ($score >= 50 ? 'needs-improvement' : 'poor');
 
-        return [
-            'mobile'  => $build($mobileLatestRow,  $priorRows->get('mobile')),
-            'desktop' => $build($desktopLatestRow, $priorRows->get('desktop')),
-        ];
-    }
+            // CWV band (always uses canonical thresholds regardless of device)
+            $lcpBand = $r['lcp'] <= 2500 ? 'good' : ($r['lcp'] <= 4000 ? 'needs-improvement' : 'poor');
+            $inpBand = $r['inp'] <= 200 ? 'good' : ($r['inp'] <= 500 ? 'needs-improvement' : 'poor');
+            $clsBand = $r['cls'] <= 0.1 ? 'good' : ($r['cls'] <= 0.25 ? 'needs-improvement' : 'poor');
 
-    /**
-     * Parse the top failing audits from a Lighthouse snapshot's raw_response.
-     *
-     * Sorted by (weight × (1 − score)) descending — highest score-impact first,
-     * matching DebugBear's "sorted by impact" presentation.
-     * Returns at most 15 audits to avoid overwhelming the UI.
-     *
-     * @return array<int, array{id: string, title: string, description: string|null, score: float|null, weight: float, display_value: string|null}>
-     */
-    private function buildAuditList(?LighthouseSnapshot $snap): array
-    {
-        if ($snap === null || $snap->raw_response === null) {
-            return [];
-        }
+            // Lighthouse audit opportunities (shown in drawer)
+            $audits = $this->buildAuditsForScore($score);
 
-        $lr        = $snap->raw_response['lighthouseResult'] ?? [];
-        $auditRefs = $lr['categories']['performance']['auditRefs'] ?? [];
-        $allAudits = $lr['audits'] ?? [];
+            // 30-day score history (used for sparkline column)
+            $history = $this->scoreHistory($score, 30);
 
-        // Build weight map: auditId → weight (only audits that affect the score).
-        $weights = [];
-        foreach ($auditRefs as $ref) {
-            if (isset($ref['id'], $ref['weight']) && $ref['weight'] > 0) {
-                $weights[$ref['id']] = (float) $ref['weight'];
-            }
-        }
-
-        $results = [];
-        foreach ($weights as $id => $weight) {
-            $audit = $allAudits[$id] ?? null;
-            if ($audit === null) {
-                continue;
-            }
-
-            $score = isset($audit['score']) ? (float) $audit['score'] : null;
-
-            // Skip passing audits (score ≥ 0.9) and informational items (null score).
-            if ($score === null || $score >= 0.9) {
-                continue;
-            }
-
-            $results[] = [
-                'id'            => $id,
-                'title'         => $audit['title']       ?? $id,
-                'description'   => $audit['description'] ?? null,
-                'score'         => $score,
-                'weight'        => $weight,
-                'display_value' => $audit['displayValue'] ?? null,
+            $rows[] = [
+                'id'              => $i + 1,
+                'url'             => $r['url'],
+                'page_type'       => $r['type'],
+                'speed_score'     => $score,
+                'score_band'      => $band,
+                'lcp_ms'          => $r['lcp'],
+                'lcp_band'        => $lcpBand,
+                'inp_ms'          => $r['inp'],
+                'inp_band'        => $inpBand,
+                'cls'             => $r['cls'],
+                'cls_band'        => $clsBand,
+                'ttfb_ms'         => $r['ttfb'],
+                // Lighthouse audit scores (0-100) for the drawer dials
+                'lighthouse_performance'    => $score,
+                'lighthouse_accessibility'  => rand(82, 98),
+                'lighthouse_best_practices' => rand(75, 96),
+                'lighthouse_seo'            => rand(88, 100),
+                'source'          => $r['crux'] ? 'crux' : 'lighthouse',
+                'sample_size'     => $r['sample'],
+                'last_checked_at' => $now->copy()->subHours(rand(1, 18))->toISOString(),
+                'ad_spend_28d'    => $r['spend'] > 0 ? (float) $r['spend'] : null,
+                'score_history'   => $history,
+                'audits'          => $audits,
             ];
         }
 
-        // Sort descending by impact: weight × (1 − score).
-        usort($results, static fn ($a, $b) =>
-            ($b['weight'] * (1 - ($b['score'] ?? 1))) <=> ($a['weight'] * (1 - ($a['score'] ?? 1)))
-        );
-
-        return array_slice($results, 0, 15);
+        return $rows;
     }
 
     /**
-     * Detect performance regressions by comparing the latest snapshot against
-     * the most recent snapshot from the 7–14 day prior window.
+     * Build top failing Lighthouse audit opportunities for a given score.
+     * Lower score = more/worse audits (realistic distribution).
      *
-     * Three alert types (Uptime <99.5% deferred to Phase 5):
-     *   score_drop      — performance_score dropped >10 pts
-     *   lcp_regression  — LCP increased >500ms
-     *   new_failing_audit — new audits with score < 0.9 vs 7 days ago
-     *
-     * Alerts are ephemeral (computed per request) — not written to the alerts table,
-     * which is for durable anomaly signals with review workflow.
-     *
-     * @param  \Illuminate\Support\Collection<string, LighthouseSnapshot> $latestPerUrlStrategy
-     * @return array<int, array{type: string, severity: string, message: string, url_id: int, url_label: string, delta: int|float}>
+     * @return array<int, array{id: string, title: string, savings_ms: int|null, score: float}>
      */
-    private function buildPerformanceAlerts(
-        int $workspaceId,
-        array $storeUrls,
-        \Illuminate\Support\Collection $latestPerUrlStrategy,
-    ): array {
-        if (empty($storeUrls)) {
-            return [];
+    private function buildAuditsForScore(int $score): array
+    {
+        $allAudits = [
+            ['id' => 'render-blocking-resources', 'title' => 'Eliminate render-blocking resources', 'savings_ms' => 840],
+            ['id' => 'unused-javascript',         'title' => 'Remove unused JavaScript',           'savings_ms' => 620],
+            ['id' => 'unused-css-rules',          'title' => 'Remove unused CSS',                  'savings_ms' => 310],
+            ['id' => 'uses-optimized-images',     'title' => 'Efficiently encode images',          'savings_ms' => 1200],
+            ['id' => 'uses-text-compression',     'title' => 'Enable text compression',            'savings_ms' => 280],
+            ['id' => 'uses-responsive-images',    'title' => 'Properly size images',               'savings_ms' => 540],
+            ['id' => 'largest-contentful-paint',  'title' => 'Largest Contentful Paint element',   'savings_ms' => null],
+            ['id' => 'total-blocking-time',       'title' => 'Reduce Total Blocking Time',         'savings_ms' => 390],
+            ['id' => 'server-response-time',      'title' => 'Reduce initial server response time','savings_ms' => 220],
+            ['id' => 'uses-long-cache-ttl',       'title' => 'Serve static assets with efficient cache policy', 'savings_ms' => null],
+            ['id' => 'dom-size',                  'title' => 'Avoid an excessive DOM size',        'savings_ms' => null],
+            ['id' => 'third-party-summary',       'title' => 'Reduce the impact of third-party code', 'savings_ms' => 480],
+        ];
+
+        // More failing audits for lower scores
+        $count = $score >= 90 ? 1 : ($score >= 70 ? 3 : ($score >= 50 ? 6 : 9));
+        $items = array_slice($allAudits, 0, $count);
+
+        return array_map(fn ($a) => [
+            ...$a,
+            'score' => round(max(0.0, ($score / 100) - 0.1 + (mt_rand(0, 20) / 100)), 2),
+        ], $items);
+    }
+
+    /**
+     * Generate a 30-point score history with realistic drift, ± noise per day.
+     * Used for the sparkline column in the table.
+     *
+     * @return int[]
+     */
+    private function scoreHistory(int $current, int $days): array
+    {
+        $pts   = [];
+        $value = max(10, $current - rand(0, 12));
+        for ($i = 0; $i < $days; $i++) {
+            $value = max(5, min(100, $value + rand(-4, 5)));
+            $pts[] = $value;
+        }
+        $pts[$days - 1] = $current;
+        return $pts;
+    }
+
+    /**
+     * Build weekly CWV trend data for the LineChart (12 weeks × 3 metrics).
+     *
+     * @return array<int, array{date: string, lcp_p75: float, inp_p75: float, cls_p75: float, is_partial: bool}>
+     */
+    private function buildTrendData(int $weeks): array
+    {
+        $rows  = [];
+        $lcp   = 3200.0;
+        $inp   = 360.0;
+        $cls   = 0.18;
+        $today = now()->startOfWeek();
+
+        for ($i = $weeks - 1; $i >= 0; $i--) {
+            $weekStart = $today->copy()->subWeeks($i);
+            $lcp       = max(1200, $lcp + rand(-180, 120));
+            $inp       = max(80, $inp + rand(-30, 20));
+            $cls       = max(0.01, round($cls + (rand(-3, 2) / 100), 3));
+
+            $rows[] = [
+                'date'       => $weekStart->toDateString(),
+                'lcp_p75'    => $lcp,
+                'inp_p75'    => $inp,
+                'cls_p75'    => $cls,
+                'is_partial' => $i === 0,
+            ];
         }
 
-        $allUrlIds = array_column($storeUrls, 'id');
+        return $rows;
+    }
 
-        // Prior snapshots: most recent mobile snapshot per URL in the 7–14 day window.
-        $priorRows = LighthouseSnapshot::withoutGlobalScopes()
-            ->where('workspace_id', $workspaceId)
-            ->whereIn('store_url_id', $allUrlIds)
-            ->where('strategy', 'mobile')
-            ->whereBetween('checked_at', [
-                now()->subDays(14)->startOfDay(),
-                now()->subDays(7)->endOfDay(),
-            ])
-            ->selectRaw('
-                DISTINCT ON (store_url_id)
-                store_url_id,
-                performance_score,
-                lcp_ms,
-                raw_response
-            ')
-            ->orderByRaw('store_url_id, checked_at DESC')
-            ->get()
-            ->keyBy('store_url_id');
+    /**
+     * Build QuadrantChart points: X = speed score, Y = ROAS, size = ad_spend.
+     * Only URLs with ad spend appear in the quadrant.
+     *
+     * @param  array<int, array<string,mixed>> $urlRows
+     * @return array<int, array{id: int, label: string, x: float, y: float|null, size: float|null, meta: array<string,mixed>}>
+     */
+    private function buildQuadrantPoints(array $urlRows): array
+    {
+        $points = [];
+        $roasMap = [
+            // homepage → no direct ROAS
+            8 => 3.8, 9 => 4.2, 10 => 2.9, 11 => 1.4, 12 => 5.1,
+            13 => 2.1, 14 => 0.8, 15 => 6.2, 16 => 3.6, 18 => 4.8,
+            19 => 1.9, 20 => 1.2, 21 => 7.1, 22 => 2.5, 23 => 4.0,
+            25 => 3.3, 3 => 1.5, 4 => 2.8, 5 => 3.2, 6 => 0.9, 7 => 2.4,
+        ];
 
-        $alerts = [];
-
-        foreach ($storeUrls as $su) {
-            $latest = $latestPerUrlStrategy->get($su['id'] . '_mobile');
-            $prior  = $priorRows->get($su['id']);
-            $label  = $su['label'] ?? $su['url'];
-
-            if ($latest === null || $prior === null) {
+        foreach ($urlRows as $row) {
+            if ($row['ad_spend_28d'] === null || $row['ad_spend_28d'] <= 0) {
                 continue;
             }
-
-            // (a) Performance score drop > 10 pts.
-            if ($latest->performance_score !== null && $prior->performance_score !== null) {
-                $drop = $prior->performance_score - $latest->performance_score;
-                if ($drop > 10) {
-                    $alerts[] = [
-                        'type'      => 'score_drop',
-                        'severity'  => $drop > 20 ? 'critical' : 'warning',
-                        'message'   => "Performance score dropped {$drop} pts (now {$latest->performance_score})",
-                        'url_id'    => $su['id'],
-                        'url_label' => $label,
-                        'delta'     => $drop,
-                    ];
-                }
-            }
-
-            // (b) LCP regression > 500 ms.
-            if ($latest->lcp_ms !== null && $prior->lcp_ms !== null) {
-                $regression = $latest->lcp_ms - $prior->lcp_ms;
-                if ($regression > 500) {
-                    $alerts[] = [
-                        'type'      => 'lcp_regression',
-                        'severity'  => 'warning',
-                        'message'   => 'LCP increased by ' . number_format($regression / 1000, 1) . 's',
-                        'url_id'    => $su['id'],
-                        'url_label' => $label,
-                        'delta'     => $regression,
-                    ];
-                }
-            }
-
-            // (c) Newly failing audits vs 7 days ago.
-            if ($latest->raw_response !== null && $prior->raw_response !== null) {
-                $latestFailing = $this->failingAuditIds($latest->raw_response);
-                $priorFailing  = $this->failingAuditIds($prior->raw_response);
-                $newlyFailing  = array_diff($latestFailing, $priorFailing);
-
-                if (count($newlyFailing) > 0) {
-                    $n = count($newlyFailing);
-                    $alerts[] = [
-                        'type'      => 'new_failing_audit',
-                        'severity'  => 'warning',
-                        'message'   => "{$n} new failing " . ($n === 1 ? 'audit' : 'audits') . ' vs 7 days ago',
-                        'url_id'    => $su['id'],
-                        'url_label' => $label,
-                        'delta'     => $n,
-                    ];
-                }
-            }
+            $roas    = $roasMap[$row['id']] ?? round(0.6 + ($row['speed_score'] / 40), 2);
+            $points[] = [
+                'id'    => $row['id'],
+                'label' => parse_url($row['url'], PHP_URL_PATH) ?: '/',
+                'x'     => (float) $row['speed_score'],
+                'y'     => $roas,
+                'size'  => $row['ad_spend_28d'],
+                'meta'  => [
+                    'LCP'      => round($row['lcp_ms'] / 1000, 2) . 's',
+                    'Spend'    => '$' . number_format($row['ad_spend_28d']),
+                    'ROAS'     => $roas . '×',
+                    'Source'   => $row['source'],
+                ],
+            ];
         }
 
-        return $alerts;
+        return $points;
     }
 
     /**
-     * Returns audit IDs with score < 0.9 from a raw_response array (already decoded).
+     * Generate a smooth pct sparkline (values between $min and $max, 30 points).
      *
-     * @param  array<string, mixed> $rawResponse
-     * @return string[]
+     * @return float[]
      */
-    private function failingAuditIds(array $rawResponse): array
+    private function sparklinePct(float $min, float $max, int $n): array
     {
-        $audits  = $rawResponse['lighthouseResult']['audits'] ?? [];
-        $failing = [];
-
-        foreach ($audits as $id => $audit) {
-            $score = $audit['score'] ?? null;
-            if ($score !== null && (float) $score < 0.9) {
-                $failing[] = $id;
-            }
+        $pts   = [];
+        $value = $min + ($max - $min) * 0.3;
+        for ($i = 0; $i < $n; $i++) {
+            $value = max($min, min($max, $value + (rand(-3, 4) / 10) * ($max - $min) / 20));
+            $pts[] = round($value, 1);
         }
+        return $pts;
+    }
 
-        return $failing;
+    /**
+     * Generate a smooth integer sparkline (values between $min and $max, n points).
+     *
+     * @return int[]
+     */
+    private function sparklineInt(int $min, int $max, int $n): array
+    {
+        $pts   = [];
+        $value = (int) ($min + ($max - $min) * 0.4);
+        for ($i = 0; $i < $n; $i++) {
+            $value = max($min, min($max, $value + rand(-2, 3)));
+            $pts[] = $value;
+        }
+        return $pts;
     }
 }

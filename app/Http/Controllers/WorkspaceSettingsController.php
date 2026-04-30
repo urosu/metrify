@@ -48,6 +48,10 @@ class WorkspaceSettingsController extends Controller
                 'holiday_lead_days'              => $workspace->workspace_settings->holidayLeadDays,
                 'holiday_notification_days'      => $workspace->workspace_settings->holidayNotificationDays,
                 'commercial_notification_days'   => $workspace->workspace_settings->commercialNotificationDays,
+                // Extended fields for new Settings/Workspace spec
+                'primary_country_code'           => $workspace->primary_country_code ?? null,
+                'created_at'                     => $workspace->created_at?->toISOString(),
+                'stores_count'                   => $workspace->stores()->count(),
             ],
             'userRole' => $this->resolveUserRole($request, $workspace),
         ]);

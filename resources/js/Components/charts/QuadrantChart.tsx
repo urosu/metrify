@@ -476,9 +476,11 @@ interface GenericProps {
     xLogScale?: boolean;
     /** Same for Y. Default: false. */
     yLogScale?: boolean;
+    /** Optional click handler on a dot — receives the point's `id`. */
+    onDotClick?: (id: string | number) => void;
 }
 
-function GenericQuadrantChart({ data, config, xLogScale = false, yLogScale = false }: GenericProps) {
+function GenericQuadrantChart({ data, config, xLogScale = false, yLogScale = false, onDotClick }: GenericProps) {
     const containerRef = useRef<HTMLDivElement>(null);
     const [chartWidth, setChartWidth] = useState<number | null>(null);
     useLayoutEffect(() => {
@@ -625,7 +627,14 @@ function GenericQuadrantChart({ data, config, xLogScale = false, yLogScale = fal
                     />
                     <Tooltip content={React.createElement(makeGenericTooltip(config))} />
 
-                    <Scatter data={points} shape="circle">
+                    <Scatter
+                        data={points}
+                        shape="circle"
+                        cursor={onDotClick ? 'pointer' : undefined}
+                        onClick={onDotClick ? (data: { payload?: QuadrantPoint }) => {
+                            if (data?.payload?.id != null) onDotClick(data.payload.id);
+                        } : undefined}
+                    >
                         {points.map((p, idx) => (
                             <Cell
                                 key={`cell-${idx}`}

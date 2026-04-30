@@ -1,1155 +1,954 @@
-import { useState } from 'react';
-import { Head, router, usePage } from '@inertiajs/react';
+/**
+ * /performance — Core Web Vitals + Lighthouse speed page.
+ *
+ * Sections (top → bottom):
+ *   1. AlertBanner — CrUX 28d field data vs lab distinction (dismissable, info)
+ *   2. KpiGrid (4 cols) — Good LCP % · Good INP % · Good CLS % · Shopify Speed Score
+ *   3. CWV trend LineChart — LCP / INP / CLS p75 over 12 weeks (ChartAnnotationLayer)
+ *   4. In-page filter bar — device (mobile/desktop) · page type · score band · ad-traffic · CrUX-only
+ *   5. URL Performance DataTable — per-URL with CrUX/Lab chip, score, CWV, ad-spend, sparkline
+ *   6. LighthouseDrawer — row click → 4 score dials + opportunities + 90d trend + PSI link
+ *   7. QuadrantChart — Speed Score × ROAS, bubble = ad spend (below the fold)
+ *
+ * Data priority: CrUX field data first (28d, real users); Lighthouse lab fallback
+ * when CrUX sample < 75 origins. Each row carries `source: 'crux'|'lighthouse'`.
+ *
+ * Mobile tier: at <lg shows KpiGrid + desktop-only banner. Table/chart not rendered.
+ *
+ * Patterns copied:
+ *   - Shopify: event-annotation tags on trend + Good/Needs-Improvement/Poor band line
+ *   - PageSpeed Insights: "Field data" vs "Lab data" explicit labelling via source chip
+ *   - Vercel Speed Insights: device toggle above table; P75 time-series; route Kanban
+ *   - Plausible: sort-any-column; honest data-source labelling
+ *   - Northbeam QuadrantChart: X=speed Y=ROAS bubble=spend; Quadrant 3 rose zone
+ *
+ * Font floor: 14px. Body 15px. WCAG AA throughout.
+ * All colors via CSS vars. No hardcoded hex. No gold/amber for Real.
+ *
+ * @see docs/pages/performance.md
+ * @see docs/competitors/_research_performance_page.md
+ * @see docs/UX.md §5.1 MetricCard, §5.5 DataTable, §5.10 DrawerSidePanel, §5.6 QuadrantChart
+ */
+
+import React, { useMemo, useState } from 'react';
+import { Head, usePage } from '@inertiajs/react';
 import {
-    LineChart,
-    Line,
-    XAxis,
-    YAxis,
-    CartesianGrid,
-    Tooltip as RechartTooltip,
-    ResponsiveContainer,
-    ReferenceLine,
-    ReferenceArea,
-} from 'recharts';
-import { AlertTriangle, ChevronDown } from 'lucide-react';
+    Monitor,
+    Smartphone,
+    ExternalLink,
+    Search,
+    ChevronDown,
+    ChevronUp,
+    ChevronsUpDown,
+    Gauge,
+    Zap,
+    Activity,
+    LayoutList,
+} from 'lucide-react';
 import AppLayout from '@/Components/layouts/AppLayout';
 import { DateRangePicker } from '@/Components/shared/DateRangePicker';
-import { MetricCard } from '@/Components/shared/MetricCard';
 import { PageHeader } from '@/Components/shared/PageHeader';
-import { PageNarrative } from '@/Components/shared/PageNarrative';
-import { CwvBand } from '@/Components/shared/CwvBand';
-import type { CwvMetric } from '@/Components/shared/CwvBand';
+import { AlertBanner } from '@/Components/shared/AlertBanner';
+import { KpiGrid } from '@/Components/shared/KpiGrid';
+import { MetricCard } from '@/Components/shared/MetricCard';
+import { DrawerSidePanel } from '@/Components/shared/DrawerSidePanel';
+import { EmptyState } from '@/Components/shared/EmptyState';
+import { FilterChipSentence } from '@/Components/shared/FilterChipSentence';
+import { Sparkline } from '@/Components/charts/Sparkline';
+import { QuadrantChart } from '@/Components/charts/QuadrantChart';
+import { cwvBand, CwvBand } from '@/Components/shared/CwvBand';
 import { cn } from '@/lib/utils';
 import { wurl } from '@/lib/workspace-url';
-import { formatCurrency } from '@/lib/formatters';
 import type { PageProps } from '@/types';
-import type { HolidayOverlay, WorkspaceEventOverlay } from '@/Components/charts/MultiSeriesLineChart';
+import type { QuadrantPoint } from '@/Components/charts/QuadrantChart';
+import { CwvTrendChart } from './CwvTrendChart';
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+// ─── Types ─────────────────────────────────────────────────────────────────────
 
-interface StoreUrlItem {
-    id: number;
-    url: string;
-    label: string | null;
-    is_homepage: boolean;
-    store_id: number;
-    store_name: string | null;
-    store_slug: string | null;
-}
+type ScoreBand = 'good' | 'needs-improvement' | 'poor';
+type PageType  = 'homepage' | 'collection' | 'product' | 'cart' | 'checkout' | 'blog' | 'other';
+type DataSource = 'crux' | 'lighthouse';
+type Device = 'mobile' | 'desktop';
 
-type CruxSource = 'url' | 'origin' | null;
-
-interface LatestScores {
-    performance_score: number | null;
-    seo_score: number | null;
-    accessibility_score: number | null;
-    best_practices_score: number | null;
-    lcp_ms: number | null;
-    fcp_ms: number | null;
-    cls_score: number | null;
-    inp_ms: number | null;
-    ttfb_ms: number | null;
-    tbt_ms: number | null;
-    crux_source: CruxSource;
-    crux_lcp_p75_ms: number | null;
-    crux_inp_p75_ms: number | null;
-    crux_cls_p75: number | null;
-    crux_fcp_p75_ms: number | null;
-    crux_ttfb_p75_ms: number | null;
-    checked_at: string | null;
-}
-
-interface HistoryPoint {
-    date: string;
-    checked_at: string;
-    performance_score: number | null;
-    seo_score: number | null;
-    accessibility_score: number | null;
-    best_practices_score: number | null;
-    lcp_ms: number | null;
-    cls_score: number | null;
-    inp_ms: number | null;
-    crux_source: CruxSource;
-    crux_lcp_p75_ms: number | null;
-    crux_inp_p75_ms: number | null;
-    crux_cls_p75: number | null;
-}
-
-interface ScoreDelta {
-    performance:    number | null;
-    seo:            number | null;
-    accessibility:  number | null;
-    best_practices: number | null;
-}
-
-interface UrlSummaryRow extends StoreUrlItem {
-    mobile_performance_score: number | null;
-    mobile_seo_score: number | null;
-    mobile_lcp_ms: number | null;
-    mobile_inp_ms: number | null;
-    desktop_performance_score: number | null;
-    desktop_seo_score: number | null;
-    desktop_lcp_ms: number | null;
-    last_checked_at: string | null;
-    monthly_orders: number;
-    revenue_risk: number;
-}
-
-interface PerformanceAudit {
+interface Audit {
     id: string;
     title: string;
-    description: string | null;
-    score: number | null;
-    weight: number;
-    display_value: string | null;
+    savings_ms: number | null;
+    score: number;
 }
 
-interface PerformanceAlert {
-    type: 'score_drop' | 'lcp_regression' | 'new_failing_audit';
-    severity: 'warning' | 'critical';
-    message: string;
-    url_id: number;
-    url_label: string;
-    delta: number;
+interface UrlRow {
+    id: number;
+    url: string;
+    page_type: PageType;
+    speed_score: number;
+    score_band: ScoreBand;
+    lcp_ms: number;
+    lcp_band: ScoreBand;
+    inp_ms: number;
+    inp_band: ScoreBand;
+    cls: number;
+    cls_band: ScoreBand;
+    ttfb_ms: number;
+    lighthouse_performance: number;
+    lighthouse_accessibility: number;
+    lighthouse_best_practices: number;
+    lighthouse_seo: number;
+    source: DataSource;
+    sample_size: number | null;
+    last_checked_at: string;
+    ad_spend_28d: number | null;
+    score_history: number[];
+    audits: Audit[];
 }
 
-interface Props extends PageProps {
-    store_urls: StoreUrlItem[];
-    selected_url_id: number | null;
-    mobile_latest: LatestScores | null;
-    desktop_latest: LatestScores | null;
-    mobile_history: HistoryPoint[];
-    desktop_history: HistoryPoint[];
-    mobile_score_delta: ScoreDelta | null;
-    desktop_score_delta: ScoreDelta | null;
-    url_summary: UrlSummaryRow[];
-    holiday_overlays: HolidayOverlay[];
-    workspace_event_overlays: WorkspaceEventOverlay[];
+interface KpiData {
+    label: string;
+    qualifier: string;
+    value: number | null;
+    unit: 'pct' | null;
+    delta_pct: number;
+    sparkline: number[];
+    source: string;
+}
+
+interface TrendPoint {
+    date: string;
+    lcp_p75: number;
+    inp_p75: number;
+    cls_p75: number;
+    is_partial: boolean;
+}
+
+// QuadrantPoint is re-used from the shared chart component.
+// We alias it here so the controller-provided data maps directly.
+type QuadrantPointData = QuadrantPoint;
+
+interface Annotation {
+    date: string;
+    name: string;
+    event_type: string;
+}
+
+interface Props {
     from: string;
     to: string;
-    revenue_at_risk: number;
-    performance_audits: PerformanceAudit[];
-    performance_alerts: PerformanceAlert[];
-    narrative: string | null;
+    device: Device;
+    kpis: KpiData[];
+    trend: TrendPoint[];
+    url_rows: UrlRow[];
+    quadrant_points: QuadrantPointData[];
+    annotations: Annotation[];
+    psi_connected: boolean;
+    total_urls: number;
+    crux_url_count: number;
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ─── Helpers ───────────────────────────────────────────────────────────────────
 
-type ScoreGrade = 'good' | 'needs-improvement' | 'poor' | 'unknown';
-
-function scoreGrade(score: number | null): ScoreGrade {
-    if (score === null) return 'unknown';
-    if (score >= 90)   return 'good';
-    if (score >= 50)   return 'needs-improvement';
-    return 'poor';
+function fmtMs(ms: number): string {
+    if (ms >= 1000) return `${(ms / 1000).toFixed(1)}s`;
+    return `${Math.round(ms)}ms`;
 }
 
-function scoreColor(grade: ScoreGrade): string {
-    switch (grade) {
-        case 'good':              return 'text-green-600';
-        case 'needs-improvement': return 'text-amber-600';
-        case 'poor':              return 'text-red-600';
-        default:                  return 'text-zinc-400';
-    }
+function fmtCls(v: number): string { return v.toFixed(3); }
+
+function fmtCurrency(n: number): string {
+    return '$' + new Intl.NumberFormat('en').format(Math.round(n));
 }
 
-function scoreBg(grade: ScoreGrade): string {
-    switch (grade) {
-        case 'good':              return 'bg-green-50  border-green-200';
-        case 'needs-improvement': return 'bg-amber-50  border-amber-200';
-        case 'poor':              return 'bg-red-50    border-red-200';
-        default:                  return 'bg-zinc-50   border-zinc-200';
-    }
+function fmtRelative(iso: string): string {
+    const seconds = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+    if (seconds < 60) return 'just now';
+    const m = Math.floor(seconds / 60);
+    if (m < 60) return `${m}m ago`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h}h ago`;
+    return `${Math.floor(h / 24)}d ago`;
 }
 
-function fmtMs(ms: number | null): string {
-    if (ms === null) return '—';
-    if (ms >= 1000)  return `${(ms / 1000).toFixed(2)} s`;
-    return `${ms} ms`;
-}
-
-function fmtCls(cls: number | null): string {
-    if (cls === null) return '—';
-    return cls.toFixed(3);
-}
-
-function fmtDate(iso: string): string {
-    return new Date(iso).toLocaleDateString('en', { month: 'short', day: 'numeric' });
-}
-
-// ─── Score card ───────────────────────────────────────────────────────────────
-
-function ScoreCard({ label, score, delta }: { label: string; score: number | null; delta?: number | null }) {
-    const grade = scoreGrade(score);
-    return (
-        <div className={cn('rounded-xl border p-4 space-y-1', scoreBg(grade))}>
-            <div className="text-xs font-medium text-zinc-500">{label}</div>
-            <div className={cn('text-2xl font-bold tabular-nums', scoreColor(grade))}>
-                {score !== null ? score : '—'}
-            </div>
-            <div className="text-xs text-zinc-400">/ 100</div>
-            {delta != null && (
-                <div className={cn(
-                    'flex w-fit items-center rounded-full px-1.5 py-0.5 text-xs font-semibold',
-                    delta > 0  ? 'bg-green-100 text-green-700'
-                    : delta < 0 ? 'bg-red-100 text-red-700'
-                    :             'bg-zinc-100 text-zinc-500',
-                )}>
-                    {delta > 0 ? '+' : ''}{delta} pts
-                </div>
-            )}
-        </div>
-    );
-}
-
-// ─── CWV card ─────────────────────────────────────────────────────────────────
-
-// Source badge config: Field (real Chrome users) > Origin (domain-level) > Lab (synthetic)
-const CRUX_SOURCE_BADGE: Record<string, { label: string; className: string }> = {
-    url:    { label: 'Field',   className: 'bg-emerald-50 text-emerald-700 border border-emerald-200' },
-    origin: { label: 'Origin',  className: 'bg-blue-50 text-blue-700 border border-blue-200' },
-    lab:    { label: 'Lab',     className: 'bg-zinc-100 text-zinc-500 border border-zinc-200' },
+const PAGE_TYPE_LABELS: Record<PageType, string> = {
+    homepage:   'Homepage',
+    collection: 'Collection',
+    product:    'Product',
+    cart:       'Cart',
+    checkout:   'Checkout',
+    blog:       'Blog',
+    other:      'Other',
 };
 
-function CwvCard({
-    label,
-    value,
-    metric,
-    rawValue,
-    description,
-    source,
-}: {
-    label: string;
-    value: string;
-    metric: CwvMetric | null;
-    rawValue: number | null;
-    description: string;
-    source?: string | null;
-}) {
-    const badge = source ? CRUX_SOURCE_BADGE[source] : null;
+const SCORE_BAND_STYLES: Record<ScoreBand, { dot: string; text: string }> = {
+    'good':             { dot: 'bg-emerald-500', text: 'text-emerald-700' },
+    'needs-improvement':{ dot: 'bg-amber-400',   text: 'text-amber-700'  },
+    'poor':             { dot: 'bg-rose-500',     text: 'text-rose-700'  },
+};
+
+function ScoreCell({ score, band }: { score: number; band: ScoreBand }) {
+    const { dot, text } = SCORE_BAND_STYLES[band];
     return (
-        <div className="rounded-xl border border-zinc-200 bg-white p-4 space-y-1">
-            <div className="flex items-center justify-between gap-1">
-                <span className="text-xs font-medium text-zinc-500">{label}</span>
-                <div className="flex items-center gap-1.5">
-                    {badge && (
-                        <span className={cn('rounded-full px-1.5 py-0.5 text-xs font-medium', badge.className)}>
-                            {badge.label}
+        <span className={cn('inline-flex items-center gap-1.5 tabular-nums font-medium text-sm', text)}>
+            <span className={cn('h-2 w-2 rounded-full shrink-0', dot)} />
+            {score}
+        </span>
+    );
+}
+
+/** Source chip: 'crux' (emerald, field data) or 'lighthouse' (sky, lab). */
+function SourceChip({ source }: { source: DataSource }) {
+    if (source === 'crux') {
+        return (
+            <span
+                className="inline-flex items-center rounded-full px-1.5 py-px text-xs font-medium bg-emerald-50 text-emerald-700 border border-emerald-200"
+                title="CrUX: 28-day Chrome User Experience Report (real users)"
+            >
+                CrUX
+            </span>
+        );
+    }
+    return (
+        <span
+            className="inline-flex items-center rounded-full px-1.5 py-px text-xs font-medium bg-sky-50 text-sky-700 border border-sky-200"
+            title="Lab: Lighthouse synthetic test (no real-user field data for this URL)"
+        >
+            Lab
+        </span>
+    );
+}
+
+/** Sortable column header */
+function SortTh({
+    col, label, sort, sortDir, onSort, align = 'right',
+}: {
+    col: string; label: string; sort: string; sortDir: 'asc' | 'desc';
+    onSort: (c: string) => void; align?: 'left' | 'right';
+}) {
+    const active = sort === col;
+    return (
+        <th className={cn('px-3 py-2.5 text-xs font-semibold uppercase tracking-wide text-zinc-500', align === 'right' && 'text-right')}>
+            <button
+                onClick={() => onSort(col)}
+                className={cn('inline-flex items-center gap-1 transition-colors hover:text-zinc-800', active && 'text-zinc-800')}
+            >
+                {label}
+                {active
+                    ? (sortDir === 'desc' ? <ChevronDown className="h-3 w-3" /> : <ChevronUp className="h-3 w-3" />)
+                    : <ChevronsUpDown className="h-3 w-3 opacity-40" />}
+            </button>
+        </th>
+    );
+}
+
+// ─── Lighthouse Score Dial ─────────────────────────────────────────────────────
+
+function ScoreDial({ label, score }: { label: string; score: number }) {
+    const band = score >= 90 ? 'good' : score >= 50 ? 'needs-improvement' : 'poor';
+    const color = band === 'good' ? 'var(--color-success)' : band === 'needs-improvement' ? 'var(--color-warning)' : 'var(--color-danger)';
+    const r = 28;
+    const circ = 2 * Math.PI * r;
+    const offset = circ - (score / 100) * circ;
+
+    return (
+        <div className="flex flex-col items-center gap-1">
+            <div className="relative h-16 w-16">
+                <svg viewBox="0 0 72 72" className="h-16 w-16 -rotate-90">
+                    <circle cx="36" cy="36" r={r} fill="none" strokeWidth="6" stroke="var(--border-subtle)" />
+                    <circle
+                        cx="36" cy="36" r={r}
+                        fill="none" strokeWidth="6"
+                        stroke={color}
+                        strokeDasharray={circ}
+                        strokeDashoffset={offset}
+                        strokeLinecap="round"
+                        style={{ transition: 'stroke-dashoffset 0.6s ease' }}
+                    />
+                </svg>
+                <span className="absolute inset-0 flex items-center justify-center text-sm font-semibold tabular-nums text-zinc-800">
+                    {score}
+                </span>
+            </div>
+            <span className="text-xs text-zinc-500 text-center leading-tight">{label}</span>
+        </div>
+    );
+}
+
+// ─── Lighthouse Drawer ─────────────────────────────────────────────────────────
+
+function LighthouseDrawer({
+    row,
+    open,
+    onClose,
+}: {
+    row: UrlRow | null;
+    open: boolean;
+    onClose: () => void;
+}) {
+    if (!row) return null;
+
+    let displayPath = row.url;
+    try { displayPath = new URL(row.url).pathname; } catch {}
+
+    const historyData = row.score_history.map((v) => ({ value: v }));
+
+    return (
+        <DrawerSidePanel
+            open={open}
+            onClose={onClose}
+            title={displayPath}
+            subtitle={
+                <div className="flex items-center gap-2 flex-wrap">
+                    <SourceChip source={row.source} />
+                    <span className="text-xs text-zinc-400">{PAGE_TYPE_LABELS[row.page_type]}</span>
+                    <span className="text-xs text-zinc-400">· synced {fmtRelative(row.last_checked_at)}</span>
+                </div>
+            }
+            headerActions={
+                <a
+                    href={`https://pagespeed.web.dev/report?url=${encodeURIComponent(row.url)}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-2.5 py-1.5 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-50 hover:text-zinc-800"
+                >
+                    <ExternalLink className="h-3 w-3" />
+                    PageSpeed Insights
+                </a>
+            }
+            width={540}
+        >
+            {/* ── Four score dials ── */}
+            <div className="mb-6">
+                <h3 className="mb-3 text-xs font-semibold uppercase tracking-wide text-zinc-500">Lighthouse scores</h3>
+                <div className="flex items-center justify-around rounded-xl border border-zinc-200 bg-zinc-50 py-5">
+                    <ScoreDial label="Performance" score={row.lighthouse_performance} />
+                    <ScoreDial label="Accessibility" score={row.lighthouse_accessibility} />
+                    <ScoreDial label="Best Practices" score={row.lighthouse_best_practices} />
+                    <ScoreDial label="SEO" score={row.lighthouse_seo} />
+                </div>
+            </div>
+
+            {/* ── Core Web Vitals ── */}
+            <div className="mb-6">
+                <h3 className="mb-3 text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                    Core Web Vitals
+                    {row.source === 'crux' && (
+                        <span className="ml-2 normal-case font-normal text-zinc-400">
+                            · 28-day field data {row.sample_size ? `(${new Intl.NumberFormat('en').format(row.sample_size)} sessions)` : ''}
                         </span>
                     )}
-                    {metric !== null
-                        ? <CwvBand metric={metric} value={rawValue} />
-                        : <span className="rounded-full px-2 py-0.5 text-xs font-semibold bg-zinc-100 text-zinc-400">—</span>
-                    }
-                </div>
-            </div>
-            <div className="text-xl font-semibold text-zinc-900 tabular-nums">{value}</div>
-            <div className="text-xs text-zinc-400">{description}</div>
-        </div>
-    );
-}
-
-// ─── Strategy column ──────────────────────────────────────────────────────────
-// Renders scores + CWV for one strategy (mobile or desktop).
-
-function StrategyColumn({
-    label,
-    scores,
-    delta,
-}: {
-    label: string;
-    scores: LatestScores | null;
-    delta?: ScoreDelta | null;
-}) {
-    const lastChecked = scores?.checked_at
-        ? new Date(scores.checked_at).toLocaleDateString('en', {
-              month: 'short', day: 'numeric',
-          })
-        : null;
-
-    return (
-        <div className="space-y-4 flex-1 min-w-0">
-            {/* Strategy label + checked timestamp */}
-            <div className="flex items-baseline gap-3">
-                <h2 className="text-sm font-semibold text-zinc-700">{label}</h2>
-                {lastChecked && (
-                    <span className="text-xs text-zinc-400">checked {lastChecked}</span>
-                )}
-            </div>
-
-            {scores === null ? (
-                <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-6 text-center text-sm text-zinc-400">
-                    No data yet
-                </div>
-            ) : (
-                <>
-                    {/* Lighthouse score cards */}
-                    <div className="grid grid-cols-2 gap-3">
-                        <ScoreCard label="Performance"    score={scores.performance_score}    delta={delta?.performance} />
-                        <ScoreCard label="Accessibility"  score={scores.accessibility_score}  delta={delta?.accessibility} />
-                        <ScoreCard label="SEO"            score={scores.seo_score}            delta={delta?.seo} />
-                        <ScoreCard label="Best Practices" score={scores.best_practices_score} delta={delta?.best_practices} />
-                    </div>
-
-                    {/* Core Web Vitals — prefer CrUX field data, fall back to lab */}
-                    <div className="grid grid-cols-2 gap-3">
-                        {(() => {
-                            const cruxSource = scores.crux_source;
-                            const lcpVal  = scores.crux_lcp_p75_ms ?? scores.lcp_ms;
-                            const clsVal  = scores.crux_cls_p75    ?? scores.cls_score;
-                            const inpVal  = scores.crux_inp_p75_ms ?? scores.inp_ms;
-                            const ttfbVal = scores.crux_ttfb_p75_ms ?? scores.ttfb_ms;
-                            const cwvSrc  = (_: number | null, cruxV: number | null) =>
-                                cruxV != null ? (cruxSource ?? 'lab') : 'lab';
-                            return (
-                                <>
-                                    <CwvCard
-                                        label="LCP"
-                                        value={fmtMs(lcpVal)}
-                                        metric="lcp"
-                                        rawValue={lcpVal}
-                                        source={cwvSrc(scores.lcp_ms, scores.crux_lcp_p75_ms)}
-                                        description="Largest Contentful Paint · ≤ 2.5 s"
-                                    />
-                                    <CwvCard
-                                        label="CLS"
-                                        value={fmtCls(clsVal)}
-                                        metric="cls"
-                                        rawValue={clsVal}
-                                        source={cwvSrc(scores.cls_score, scores.crux_cls_p75)}
-                                        description="Cumulative Layout Shift · ≤ 0.10"
-                                    />
-                                    <CwvCard
-                                        label="INP"
-                                        value={fmtMs(inpVal)}
-                                        metric="inp"
-                                        rawValue={inpVal}
-                                        source={cwvSrc(scores.inp_ms, scores.crux_inp_p75_ms)}
-                                        description={inpVal === null
-                                            ? 'Interaction to Next Paint · no data (requires real users)'
-                                            : 'Interaction to Next Paint · ≤ 200 ms'}
-                                    />
-                                    <CwvCard
-                                        label="TTFB"
-                                        value={fmtMs(ttfbVal)}
-                                        metric={null}
-                                        rawValue={ttfbVal}
-                                        source={cwvSrc(scores.ttfb_ms, scores.crux_ttfb_p75_ms)}
-                                        description="Time to First Byte"
-                                    />
-                                </>
-                            );
-                        })()}
-                    </div>
-                </>
-            )}
-        </div>
-    );
-}
-
-// ─── Score trend chart ────────────────────────────────────────────────────────
-
-type ChartStrategy = 'mobile' | 'desktop';
-
-// Hex values mirror the --chart-* CSS variables (indigo, emerald, amber, rose).
-const SCORE_SERIES = [
-    { key: 'performance_score',    label: 'Performance',    color: '#4f46e5' },
-    { key: 'seo_score',            label: 'SEO',            color: '#10b981' },
-    { key: 'accessibility_score',  label: 'Accessibility',  color: '#f59e0b' },
-    { key: 'best_practices_score', label: 'Best Practices', color: '#f43f5e' },
-] as const;
-
-type ScoreSeriesKey = typeof SCORE_SERIES[number]['key'];
-
-function ScoreTrendChart({
-    mobileHistory,
-    desktopHistory,
-    holidays,
-    workspaceEvents,
-}: {
-    mobileHistory: HistoryPoint[];
-    desktopHistory: HistoryPoint[];
-    holidays: HolidayOverlay[];
-    workspaceEvents: WorkspaceEventOverlay[];
-}) {
-    const [strategy, setStrategy] = useState<ChartStrategy>('mobile');
-    const [visible, setVisible] = useState<Set<ScoreSeriesKey>>(
-        () => new Set<ScoreSeriesKey>(['performance_score']),
-    );
-    const data = strategy === 'mobile' ? mobileHistory : desktopHistory;
-
-    function toggleSeries(key: ScoreSeriesKey) {
-        setVisible((prev) => {
-            const next = new Set(prev);
-            if (next.has(key)) {
-                if (next.size > 1) next.delete(key);
-            } else {
-                next.add(key);
-            }
-            return next;
-        });
-    }
-
-    if (mobileHistory.length === 0 && desktopHistory.length === 0) {
-        return (
-            <div className="flex h-48 items-center justify-center text-sm text-zinc-400">
-                No history data for the selected date range.
-            </div>
-        );
-    }
-
-    return (
-        <div className="space-y-3">
-            {/* Controls row: strategy toggle + series pills */}
-            <div className="flex flex-wrap items-center gap-3">
-                <div className="flex rounded-lg border border-zinc-200 bg-white text-xs font-medium overflow-hidden">
-                    {(['mobile', 'desktop'] as const).map((s) => (
-                        <button
-                            key={s}
-                            onClick={() => setStrategy(s)}
-                            className={cn(
-                                'px-3 py-1.5 capitalize transition-colors',
-                                strategy === s
-                                    ? 'bg-zinc-800 text-white'
-                                    : 'text-zinc-500 hover:bg-zinc-50'
-                            )}
-                        >
-                            {s}
-                        </button>
-                    ))}
-                </div>
-
-                <div className="flex flex-wrap gap-1.5">
-                    {SCORE_SERIES.map((s) => {
-                        const on = visible.has(s.key);
-                        return (
-                            <button
-                                key={s.key}
-                                onClick={() => toggleSeries(s.key)}
-                                className={cn(
-                                    'flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium transition-colors',
-                                    on
-                                        ? 'text-white'
-                                        : 'border-zinc-200 bg-white text-zinc-400 hover:text-zinc-600',
-                                )}
-                                style={on ? { backgroundColor: s.color, borderColor: s.color } : undefined}
-                            >
-                                <span
-                                    className="h-1.5 w-1.5 rounded-full flex-shrink-0"
-                                    style={{ backgroundColor: on ? 'rgba(255,255,255,0.7)' : s.color }}
-                                />
-                                {s.label}
-                            </button>
-                        );
-                    })}
-                </div>
-            </div>
-
-            {data.length === 0 ? (
-                <div className="flex h-36 items-center justify-center text-sm text-zinc-400">
-                    No {strategy} history in this date range.
-                </div>
-            ) : (
-                <ResponsiveContainer width="100%" height={220}>
-                    <LineChart data={data} margin={{ top: 4, right: 16, bottom: 0, left: 0 }}>
-                        {/* PSI threshold bands: good ≥90, needs improvement 50-89, poor <50 */}
-                        <ReferenceArea y1={90} y2={100} fill="#16a34a" fillOpacity={0.04} ifOverflow="hidden" />
-                        <ReferenceArea y1={50} y2={90}  fill="#d97706" fillOpacity={0.04} ifOverflow="hidden" />
-                        <ReferenceArea y1={0}  y2={50}  fill="#dc2626" fillOpacity={0.04} ifOverflow="hidden" />
-
-                        <CartesianGrid strokeDasharray="3 3" stroke="#f4f4f5" />
-                        <XAxis
-                            dataKey="date"
-                            tick={{ fontSize: 11, fill: '#a1a1aa' }}
-                            tickFormatter={fmtDate}
-                            minTickGap={40}
-                        />
-                        <YAxis domain={[0, 100]} tick={{ fontSize: 11, fill: '#a1a1aa' }} width={32} />
-                        <RechartTooltip
-                            contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e4e4e7' }}
-                            labelFormatter={(v) => fmtDate(String(v))}
-                            formatter={(value: unknown, name: unknown) => [`${value} / 100`, name as string]}
-                        />
-
-                        {holidays.map((h) => (
-                            <ReferenceLine key={`h-${h.date}`} x={h.date} stroke="#a1a1aa" strokeDasharray="4 2" strokeWidth={1} />
-                        ))}
-                        {workspaceEvents.map((e) => {
-                            const isSingle = e.date_from === e.date_to;
-                            return isSingle ? (
-                                <ReferenceLine key={`e-${e.date_from}`} x={e.date_from} stroke="#3b82f6" strokeDasharray="4 2" strokeWidth={1} />
-                            ) : (
-                                <ReferenceArea key={`ea-${e.date_from}`} x1={e.date_from} x2={e.date_to} fill="#3b82f6" fillOpacity={0.06} />
-                            );
-                        })}
-
-                        {SCORE_SERIES.filter((s) => visible.has(s.key)).map((s) => (
-                            <Line
-                                key={s.key}
-                                type="monotone"
-                                dataKey={s.key}
-                                stroke={s.color}
-                                strokeWidth={2}
-                                dot={false}
-                                connectNulls={false}
-                                name={s.label}
-                            />
-                        ))}
-                    </LineChart>
-                </ResponsiveContainer>
-            )}
-        </div>
-    );
-}
-
-// ─── CWV trend chart ──────────────────────────────────────────────────────────
-
-type CwvMetricKey = 'lcp' | 'inp' | 'cls';
-
-// Maps each metric to its CrUX (field) and lab data keys in HistoryPoint.
-// CrUX is the primary series (real users, p75); lab is the secondary synthetic estimate.
-const CWV_METRICS = [
-    {
-        key:        'lcp' as CwvMetricKey,
-        label:      'LCP',
-        unit:       'ms',
-        cruxKey:    'crux_lcp_p75_ms' as keyof HistoryPoint,
-        labKey:     'lcp_ms'          as keyof HistoryPoint,
-        domain:     [0, 'auto'] as [number, 'auto'],
-        // Threshold bands per Google CWV thresholds
-        bands: [
-            { y1: 0,    y2: 2500,  fill: '#16a34a' },
-            { y1: 2500, y2: 4000,  fill: '#d97706' },
-            { y1: 4000, y2: 12000, fill: '#dc2626' },
-        ],
-        fmt:  (v: number) => fmtMs(v),
-        yFmt: (v: number) => v >= 1000 ? `${(v / 1000).toFixed(1)}s` : `${v}`,
-    },
-    {
-        key:        'inp' as CwvMetricKey,
-        label:      'INP',
-        unit:       'ms',
-        cruxKey:    'crux_inp_p75_ms' as keyof HistoryPoint,
-        labKey:     'inp_ms'          as keyof HistoryPoint,
-        domain:     [0, 'auto'] as [number, 'auto'],
-        bands: [
-            { y1: 0,   y2: 200,  fill: '#16a34a' },
-            { y1: 200, y2: 500,  fill: '#d97706' },
-            { y1: 500, y2: 2000, fill: '#dc2626' },
-        ],
-        fmt:  (v: number) => fmtMs(v),
-        yFmt: (v: number) => `${v}ms`,
-    },
-    {
-        key:        'cls' as CwvMetricKey,
-        label:      'CLS',
-        unit:       'score',
-        cruxKey:    'crux_cls_p75' as keyof HistoryPoint,
-        labKey:     'cls_score'    as keyof HistoryPoint,
-        // Fixed domain — auto-scale on a healthy site (CLS ≈ 0.03) would compress the
-        // axis so far that all three threshold bands sit above the visible area.
-        domain:     [0, 0.5] as [number, number],
-        bands: [
-            { y1: 0,    y2: 0.1,  fill: '#16a34a' },
-            { y1: 0.1,  y2: 0.25, fill: '#d97706' },
-            { y1: 0.25, y2: 0.5,  fill: '#dc2626' },
-        ],
-        fmt:  (v: number) => v.toFixed(3),
-        yFmt: (v: number) => v.toFixed(2),
-    },
-] as const;
-
-function CwvTrendChart({
-    mobileHistory,
-    desktopHistory,
-}: {
-    mobileHistory: HistoryPoint[];
-    desktopHistory: HistoryPoint[];
-}) {
-    const [strategy, setStrategy] = useState<ChartStrategy>('mobile');
-    const [metric, setMetric]     = useState<CwvMetricKey>('lcp');
-    const data = strategy === 'mobile' ? mobileHistory : desktopHistory;
-    const cfg  = CWV_METRICS.find((m) => m.key === metric)!;
-
-    // Detect whether this dataset has any CrUX field data at all.
-    const hasCrux = data.some((p) => p[cfg.cruxKey] != null);
-    const [showField, setShowField] = useState(true);
-    const [showLab,   setShowLab]   = useState(false);
-
-    // When metric changes, re-default: prefer field if available.
-    const effectiveShowField = hasCrux && showField;
-    const effectiveShowLab   = !hasCrux || showLab;   // always show lab when no CrUX
-
-    if (mobileHistory.length === 0 && desktopHistory.length === 0) {
-        return (
-            <div className="flex h-48 items-center justify-center text-sm text-zinc-400">
-                No history data for the selected date range.
-            </div>
-        );
-    }
-
-    const tooltipFormatter = (value: unknown, name: unknown) => {
-        const label = name === cfg.cruxKey ? `${cfg.label} (field p75)` : `${cfg.label} (lab)`;
-        return [cfg.fmt(Number(value)), label];
-    };
-
-    return (
-        <div className="space-y-3">
-            {/* Controls row */}
-            <div className="flex flex-wrap items-center gap-3">
-                {/* Strategy toggle */}
-                <div className="flex rounded-lg border border-zinc-200 bg-white text-xs font-medium overflow-hidden">
-                    {(['mobile', 'desktop'] as const).map((s) => (
-                        <button
-                            key={s}
-                            onClick={() => setStrategy(s)}
-                            className={cn(
-                                'px-3 py-1.5 capitalize transition-colors',
-                                strategy === s ? 'bg-zinc-800 text-white' : 'text-zinc-500 hover:bg-zinc-50',
-                            )}
-                        >
-                            {s}
-                        </button>
-                    ))}
-                </div>
-
-                {/* Metric tabs */}
-                <div className="flex gap-1.5">
-                    {CWV_METRICS.map((m) => (
-                        <button
-                            key={m.key}
-                            onClick={() => setMetric(m.key)}
-                            className={cn(
-                                'rounded-full border px-2.5 py-0.5 text-xs font-medium transition-colors',
-                                metric === m.key
-                                    ? 'bg-zinc-800 text-white border-zinc-800'
-                                    : 'border-zinc-200 bg-white text-zinc-400 hover:text-zinc-600',
-                            )}
-                        >
-                            {m.label}
-                        </button>
-                    ))}
-                </div>
-
-                {/* Series toggles — Field and Lab */}
-                <div className="flex gap-1.5 ml-auto">
-                    {hasCrux && (
-                        <button
-                            onClick={() => setShowField((v) => !v)}
-                            className={cn(
-                                'flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium transition-colors',
-                                effectiveShowField
-                                    ? 'border-emerald-400 bg-emerald-500 text-white'
-                                    : 'border-zinc-200 bg-white text-zinc-400 hover:text-zinc-600',
-                            )}
-                        >
-                            <span className="h-1.5 w-1.5 rounded-full flex-shrink-0"
-                                style={{ backgroundColor: effectiveShowField ? 'rgba(255,255,255,0.7)' : '#10b981' }} />
-                            Field p75
-                        </button>
+                    {row.source === 'lighthouse' && (
+                        <span className="ml-2 normal-case font-normal text-zinc-400">· lab (synthetic) — no real-user data for this URL</span>
                     )}
+                </h3>
+                <div className="grid grid-cols-3 gap-3">
+                    {([
+                        { label: 'LCP', metric: 'lcp' as const, value: fmtMs(row.lcp_ms), rawValue: row.lcp_ms, threshold: '≤ 2.5s good' },
+                        { label: 'INP', metric: 'inp' as const, value: fmtMs(row.inp_ms), rawValue: row.inp_ms, threshold: '≤ 200ms good' },
+                        { label: 'CLS', metric: 'cls' as const, value: fmtCls(row.cls),   rawValue: row.cls,    threshold: '≤ 0.1 good' },
+                    ] as const).map(({ label, metric, value, rawValue, threshold }) => (
+                        <div key={label} className="rounded-lg border border-zinc-200 bg-white px-3 py-3">
+                            <div className="flex items-center justify-between mb-1">
+                                <span className="text-xs font-medium text-zinc-500">{label}</span>
+                                <CwvBand metric={metric} value={rawValue} showLabel={false} className="h-2 w-2 rounded-full p-0" />
+                            </div>
+                            <div className="text-base font-semibold tabular-nums text-zinc-800">{value}</div>
+                            <div className="mt-0.5 text-xs text-zinc-400">{threshold}</div>
+                        </div>
+                    ))}
+                </div>
+
+                {/* TTFB */}
+                <div className="mt-2 flex items-center justify-between rounded-lg border border-zinc-100 bg-zinc-50 px-3 py-2">
+                    <span className="text-xs text-zinc-500">TTFB (Time to First Byte)</span>
+                    <span className={cn(
+                        'tabular-nums text-sm font-medium',
+                        row.ttfb_ms <= 800 ? 'text-emerald-700' : row.ttfb_ms <= 1800 ? 'text-amber-700' : 'text-rose-700',
+                    )}>
+                        {fmtMs(row.ttfb_ms)}
+                    </span>
+                </div>
+            </div>
+
+            {/* ── Ad spend context ── */}
+            {row.ad_spend_28d !== null && (
+                <div className="mb-6 flex items-center justify-between rounded-lg border border-zinc-200 bg-zinc-50 px-4 py-3">
+                    <div>
+                        <div className="text-xs text-zinc-500">Ad spend driving this URL (28d)</div>
+                        <div className="text-base font-semibold tabular-nums text-zinc-800">{fmtCurrency(row.ad_spend_28d)}</div>
+                    </div>
+                    {row.score_band === 'poor' && (
+                        <div className="max-w-[180px] text-xs text-rose-700 bg-rose-50 rounded-md px-2 py-1.5 border border-rose-100 text-right">
+                            Speed is Poor — budget may be converting below potential.
+                        </div>
+                    )}
+                </div>
+            )}
+
+            {/* ── Score history sparkline (90d equivalent shown as 30 points) ── */}
+            <div className="mb-6">
+                <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">Speed score over time</h3>
+                <div className="rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3">
+                    <Sparkline data={historyData} color="var(--color-primary)" height={56} mode="area" />
+                    <div className="mt-1.5 flex justify-between text-xs text-zinc-400">
+                        <span>30d ago</span>
+                        <span>Now: {row.speed_score}</span>
+                    </div>
+                </div>
+            </div>
+
+            {/* ── Lighthouse opportunities ── */}
+            {row.audits.length > 0 && (
+                <div className="mb-4">
+                    <h3 className="mb-3 text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                        Opportunities &amp; diagnostics
+                        <span className="ml-1 normal-case font-normal text-zinc-400">sorted by impact</span>
+                    </h3>
+                    <div className="space-y-1.5">
+                        {row.audits.map((audit) => (
+                            <div
+                                key={audit.id}
+                                className="flex items-center justify-between rounded-lg border border-zinc-100 bg-white px-3 py-2.5 gap-2"
+                            >
+                                <span className="text-sm text-zinc-700 flex-1 min-w-0 truncate" title={audit.title}>
+                                    {audit.title}
+                                </span>
+                                {audit.savings_ms !== null && (
+                                    <span className="shrink-0 tabular-nums text-xs font-medium text-amber-700 bg-amber-50 rounded px-1.5 py-0.5">
+                                        −{fmtMs(audit.savings_ms)}
+                                    </span>
+                                )}
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
+        </DrawerSidePanel>
+    );
+}
+
+// ─── URL Filter Bar ────────────────────────────────────────────────────────────
+
+interface Filters {
+    device: Device;
+    pageType: string;
+    scoreBand: string;
+    hasAdSpend: boolean;
+    hasCrux: boolean;
+    urlSearch: string;
+}
+
+function FilterBar({
+    filters,
+    onChange,
+}: {
+    filters: Filters;
+    onChange: (f: Partial<Filters>) => void;
+}) {
+    const chipClass = (active: boolean) =>
+        cn(
+            'inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-sm font-medium transition-colors cursor-pointer select-none',
+            active
+                ? 'border-transparent bg-zinc-800 text-white'
+                : 'border-zinc-200 bg-white text-zinc-600 hover:border-zinc-300 hover:text-zinc-800',
+        );
+
+    return (
+        <div className="flex flex-wrap items-center gap-2">
+            {/* Device toggle — matches PSI default of mobile */}
+            <div className="flex rounded-lg border border-zinc-200 overflow-hidden">
+                {(['mobile', 'desktop'] as Device[]).map((d) => (
                     <button
-                        onClick={() => setShowLab((v) => !v)}
+                        key={d}
+                        onClick={() => onChange({ device: d })}
                         className={cn(
-                            'flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium transition-colors',
-                            effectiveShowLab
-                                ? 'border-zinc-600 bg-zinc-700 text-white'
-                                : 'border-zinc-200 bg-white text-zinc-400 hover:text-zinc-600',
+                            'inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium transition-colors',
+                            filters.device === d
+                                ? 'bg-zinc-800 text-white'
+                                : 'bg-white text-zinc-600 hover:bg-zinc-50',
                         )}
                     >
-                        <span className="h-1.5 w-1.5 rounded-full flex-shrink-0"
-                            style={{ backgroundColor: effectiveShowLab ? 'rgba(255,255,255,0.7)' : '#71717a' }} />
-                        Lab
+                        {d === 'mobile' ? <Smartphone className="h-3.5 w-3.5" /> : <Monitor className="h-3.5 w-3.5" />}
+                        {d.charAt(0).toUpperCase() + d.slice(1)}
                     </button>
-                </div>
+                ))}
             </div>
 
-            {data.length === 0 ? (
-                <div className="flex h-36 items-center justify-center text-sm text-zinc-400">
-                    No {strategy} history in this date range.
-                </div>
-            ) : (
-                <ResponsiveContainer width="100%" height={220}>
-                    <LineChart data={data} margin={{ top: 4, right: 16, bottom: 0, left: 8 }}>
-                        {cfg.bands.map((b) => (
-                            <ReferenceArea
-                                key={`${b.y1}-${b.y2}`}
-                                y1={b.y1}
-                                y2={b.y2}
-                                fill={b.fill}
-                                fillOpacity={0.05}
-                                ifOverflow="hidden"
-                            />
-                        ))}
-                        <CartesianGrid strokeDasharray="3 3" stroke="#f4f4f5" />
-                        <XAxis
-                            dataKey="date"
-                            tick={{ fontSize: 11, fill: '#a1a1aa' }}
-                            tickFormatter={fmtDate}
-                            minTickGap={40}
-                        />
-                        <YAxis
-                            domain={cfg.domain}
-                            tickFormatter={cfg.yFmt}
-                            tick={{ fontSize: 11, fill: '#a1a1aa' }}
-                            width={48}
-                        />
-                        <RechartTooltip
-                            contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e4e4e7' }}
-                            labelFormatter={(v) => fmtDate(String(v))}
-                            formatter={tooltipFormatter}
-                        />
-                        {effectiveShowField && hasCrux && (
-                            <Line
-                                type="monotone"
-                                dataKey={cfg.cruxKey}
-                                stroke="#10b981"
-                                strokeWidth={2}
-                                dot={false}
-                                connectNulls={false}
-                                name={cfg.cruxKey}
-                            />
-                        )}
-                        {effectiveShowLab && (
-                            <Line
-                                type="monotone"
-                                dataKey={cfg.labKey}
-                                stroke="#71717a"
-                                strokeWidth={1.5}
-                                strokeDasharray="4 2"
-                                dot={false}
-                                connectNulls={false}
-                                name={cfg.labKey}
-                            />
-                        )}
-                    </LineChart>
-                </ResponsiveContainer>
-            )}
+            {/* Score band filter */}
+            {(['', 'good', 'needs-improvement', 'poor'] as const).map((band) => {
+                const labels: Record<string, string> = {
+                    '': 'All scores',
+                    'good': 'Good',
+                    'needs-improvement': 'Needs Improvement',
+                    'poor': 'Poor',
+                };
+                return (
+                    <button
+                        key={band || 'all'}
+                        onClick={() => onChange({ scoreBand: band })}
+                        className={chipClass(filters.scoreBand === band)}
+                    >
+                        {band === 'good' && <span className="h-2 w-2 rounded-full bg-emerald-500" />}
+                        {band === 'needs-improvement' && <span className="h-2 w-2 rounded-full bg-amber-400" />}
+                        {band === 'poor' && <span className="h-2 w-2 rounded-full bg-rose-500" />}
+                        {labels[band]}
+                    </button>
+                );
+            })}
+
+            {/* Ad-spend only */}
+            <button
+                onClick={() => onChange({ hasAdSpend: !filters.hasAdSpend })}
+                className={chipClass(filters.hasAdSpend)}
+            >
+                Has Ad Spend
+            </button>
+
+            {/* CrUX field data only */}
+            <button
+                onClick={() => onChange({ hasCrux: !filters.hasCrux })}
+                className={chipClass(filters.hasCrux)}
+            >
+                CrUX field data
+            </button>
+
+            {/* URL search */}
+            <div className="relative ml-auto">
+                <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400" />
+                <input
+                    type="text"
+                    placeholder="Filter URLs…"
+                    value={filters.urlSearch}
+                    onChange={(e) => onChange({ urlSearch: e.target.value })}
+                    className="w-48 rounded-lg border border-zinc-200 bg-white py-1.5 pl-8 pr-3 text-sm text-zinc-800 placeholder:text-zinc-400 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/20"
+                />
+            </div>
         </div>
     );
 }
 
-// ─── Score badge for table ────────────────────────────────────────────────────
+// ─── Performance Table ─────────────────────────────────────────────────────────
 
-function ScoreBadge({ score }: { score: number | null }) {
-    if (score === null) return <span className="text-zinc-300">—</span>;
-    return <span className={cn('font-semibold tabular-nums', scoreColor(scoreGrade(score)))}>{score}</span>;
-}
-
-// ─── URL selector dropdown ────────────────────────────────────────────────────
-
-function UrlSelector({
-    storeUrls,
-    selectedId,
-    from,
-    to,
-    navigate,
+function PerformanceTable({
+    rows,
+    onRowClick,
 }: {
-    storeUrls: StoreUrlItem[];
-    selectedId: number | null;
-    from: string;
-    to: string;
-    navigate: (params: Record<string, string | number | undefined>) => void;
+    rows: UrlRow[];
+    onRowClick: (row: UrlRow) => void;
 }) {
-    const [open, setOpen] = useState(false);
-    const selected = storeUrls.find((u) => u.id === selectedId);
+    const [sort, setSort] = useState('speed_score');
+    const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
 
-    if (storeUrls.length <= 1) return null;
+    const sorted = useMemo(() => {
+        return [...rows].sort((a, b) => {
+            let av: number, bv: number;
+            switch (sort) {
+                case 'speed_score':  av = a.speed_score;  bv = b.speed_score;  break;
+                case 'lcp_ms':       av = a.lcp_ms;       bv = b.lcp_ms;       break;
+                case 'inp_ms':       av = a.inp_ms;       bv = b.inp_ms;       break;
+                case 'cls':          av = a.cls;          bv = b.cls;          break;
+                case 'ttfb_ms':      av = a.ttfb_ms;      bv = b.ttfb_ms;      break;
+                case 'ad_spend_28d': av = a.ad_spend_28d ?? 0; bv = b.ad_spend_28d ?? 0; break;
+                default:             av = a.speed_score;  bv = b.speed_score;
+            }
+            return sortDir === 'asc' ? av - bv : bv - av;
+        });
+    }, [rows, sort, sortDir]);
 
-    return (
-        <div className="relative">
-            <button
-                onClick={() => setOpen((v) => !v)}
-                className="flex items-center gap-2 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
-            >
-                <span className="max-w-[240px] truncate">
-                    {selected?.label ?? selected?.url ?? 'Select URL'}
-                </span>
-                <ChevronDown className="h-4 w-4 text-zinc-400" />
-            </button>
-            {open && (
-                <>
-                    <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-                    <div className="absolute left-0 z-20 mt-1 w-80 rounded-xl border border-zinc-200 bg-white py-1 shadow-lg">
-                        {storeUrls.map((u) => (
-                            <button
-                                key={u.id}
-                                onClick={() => { setOpen(false); navigate({ url_id: u.id, from, to }); }}
-                                className={cn(
-                                    'flex w-full flex-col items-start gap-0.5 px-4 py-2 text-left hover:bg-zinc-50',
-                                    u.id === selectedId && 'bg-zinc-50'
-                                )}
-                            >
-                                <span className="text-sm font-medium text-zinc-800 truncate w-full">
-                                    {u.label ?? u.url}
-                                    {u.is_homepage && <span className="ml-1.5 text-xs text-zinc-400">(homepage)</span>}
-                                </span>
-                                {u.label && (
-                                    <span className="text-xs text-zinc-400 truncate w-full">{u.url}</span>
-                                )}
-                            </button>
-                        ))}
-                    </div>
-                </>
-            )}
-        </div>
-    );
-}
-
-// ─── Alerts panel ─────────────────────────────────────────────────────────────
-
-function AlertsPanel({ alerts }: { alerts: PerformanceAlert[] }) {
-    const [open, setOpen] = useState(false);
-    if (alerts.length === 0) return null;
-
-    const criticalCount = alerts.filter((a) => a.severity === 'critical').length;
-
-    return (
-        <section className="space-y-2">
-            <button
-                onClick={() => setOpen((v) => !v)}
-                className="flex items-center gap-2 text-sm font-semibold text-zinc-700"
-            >
-                <span className={cn(
-                    'h-2 w-2 rounded-full',
-                    criticalCount > 0 ? 'bg-red-500' : 'bg-amber-400',
-                )} />
-                Performance Alerts ({alerts.length})
-                <ChevronDown className={cn('h-4 w-4 text-zinc-400 transition-transform', open && 'rotate-180')} />
-            </button>
-            {open && (
-                <div className="space-y-2">
-                    {alerts.map((alert, i) => (
-                        <div
-                            key={i}
-                            className={cn(
-                                'flex items-start gap-3 rounded-xl border p-4 text-sm',
-                                alert.severity === 'critical'
-                                    ? 'border-red-200 bg-red-50 text-red-800'
-                                    : 'border-amber-200 bg-amber-50 text-amber-800',
-                            )}
-                        >
-                            <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
-                            <div>
-                                <span className="font-semibold">{alert.url_label}: </span>
-                                {alert.message}
-                            </div>
-                        </div>
-                    ))}
-                </div>
-            )}
-        </section>
-    );
-}
-
-// ─── Audit drill-down ─────────────────────────────────────────────────────────
-
-function AuditDrillDown({ audits }: { audits: PerformanceAudit[] }) {
-    const [open, setOpen] = useState(false);
-    if (audits.length === 0) return null;
-
-    return (
-        <section className="space-y-3">
-            <button
-                onClick={() => setOpen((v) => !v)}
-                className="section-label flex items-center gap-1.5"
-            >
-                Audit Opportunities
-                <ChevronDown className={cn('h-4 w-4 text-zinc-400 transition-transform', open && 'rotate-180')} />
-            </button>
-            {open && (
-                <div className="rounded-2xl border border-zinc-200 bg-white overflow-hidden">
-                    <table className="w-full text-sm">
-                        <thead>
-                            <tr className="border-b border-zinc-100 bg-zinc-50 text-left text-xs font-medium text-zinc-500">
-                                <th className="px-5 py-2.5">Audit</th>
-                                <th className="px-4 py-2.5 text-center w-16">Score</th>
-                                <th className="px-4 py-2.5 text-center w-16">Weight</th>
-                                <th className="px-4 py-2.5 text-right">Current</th>
-                            </tr>
-                        </thead>
-                        <tbody className="divide-y divide-zinc-100">
-                            {audits.map((a) => (
-                                <tr key={a.id} className="hover:bg-zinc-50">
-                                    <td className="px-5 py-3">
-                                        <div className="font-medium text-zinc-800">{a.title}</div>
-                                        {a.description && (
-                                            <div className="text-xs text-zinc-400 mt-0.5 line-clamp-2">{a.description}</div>
-                                        )}
-                                    </td>
-                                    <td className="px-4 py-3 text-center">
-                                        <span className={cn(
-                                            'tabular-nums font-semibold',
-                                            a.score !== null && a.score < 0.5  ? 'text-red-600'
-                                            : a.score !== null && a.score < 0.9 ? 'text-amber-600'
-                                            : 'text-zinc-400',
-                                        )}>
-                                            {a.score !== null ? Math.round(a.score * 100) : '—'}
-                                        </span>
-                                    </td>
-                                    <td className="px-4 py-3 text-center text-xs text-zinc-400 tabular-nums">
-                                        {a.weight}
-                                    </td>
-                                    <td className="px-4 py-3 text-right text-xs text-zinc-500 tabular-nums">
-                                        {a.display_value ?? '—'}
-                                    </td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                </div>
-            )}
-        </section>
-    );
-}
-
-// ─── Main page ────────────────────────────────────────────────────────────────
-
-export default function PerformancePage({
-    store_urls,
-    selected_url_id,
-    mobile_latest,
-    desktop_latest,
-    mobile_history,
-    desktop_history,
-    mobile_score_delta,
-    desktop_score_delta,
-    url_summary,
-    holiday_overlays,
-    workspace_event_overlays,
-    from,
-    to,
-    revenue_at_risk,
-    performance_audits,
-    performance_alerts,
-    narrative,
-}: Props) {
-    const { workspace } = usePage<PageProps>().props;
-    const currency     = workspace?.reporting_currency ?? 'EUR';
-    const selectedUrl  = store_urls.find((u) => u.id === selected_url_id);
-    const hasAnyData   = mobile_latest !== null || desktop_latest !== null;
-
-    function navigate(params: Record<string, string | number | undefined>) {
-        router.get(wurl(workspace?.slug, '/performance'), params as Record<string, string>, { preserveState: true, replace: true });
+    function handleSort(col: string) {
+        if (sort === col) {
+            setSortDir((d) => (d === 'desc' ? 'asc' : 'desc'));
+        } else {
+            setSort(col);
+            setSortDir('asc');
+        }
     }
 
-    // ── Empty state — no store connected ─────────────────────────────────────
-    if (store_urls.length === 0) {
+    if (rows.length === 0) {
         return (
-            <AppLayout>
-                <Head title="Site Performance" />
-                <div className="space-y-6">
-                    <PageHeader title="Site Performance" />
-                    <div className="rounded-2xl border border-zinc-200 bg-white p-10 text-center">
-                        <div className="text-zinc-400 text-sm">
-                            Connect a store to start monitoring page speed and Core Web Vitals.
-                        </div>
-                    </div>
-                </div>
+            <div className="flex h-32 items-center justify-center text-sm text-zinc-400">
+                No URLs match the current filters.
+            </div>
+        );
+    }
+
+    return (
+        <div className="overflow-x-auto">
+            <table className="w-full min-w-[900px]">
+                <thead className="sticky top-0 z-10 border-b border-zinc-100 bg-white">
+                    <tr>
+                        <th className="px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                            URL
+                        </th>
+                        <th className="px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                            Type
+                        </th>
+                        <SortTh col="speed_score"  label="Score"    sort={sort} sortDir={sortDir} onSort={handleSort} />
+                        <SortTh col="lcp_ms"       label="LCP"      sort={sort} sortDir={sortDir} onSort={handleSort} />
+                        <SortTh col="inp_ms"       label="INP"      sort={sort} sortDir={sortDir} onSort={handleSort} />
+                        <SortTh col="cls"          label="CLS"      sort={sort} sortDir={sortDir} onSort={handleSort} />
+                        <SortTh col="ttfb_ms"      label="TTFB"     sort={sort} sortDir={sortDir} onSort={handleSort} />
+                        <SortTh col="ad_spend_28d" label="Ad Spend" sort={sort} sortDir={sortDir} onSort={handleSort} />
+                        <th className="px-3 py-2.5 text-right text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                            Trend
+                        </th>
+                        <th className="px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                            Source
+                        </th>
+                    </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-100">
+                    {sorted.map((row) => {
+                        let displayPath = row.url;
+                        try { displayPath = new URL(row.url).pathname; } catch {}
+
+                        return (
+                            <tr
+                                key={row.id}
+                                className="cursor-pointer transition-colors hover:bg-zinc-50"
+                                onClick={() => onRowClick(row)}
+                            >
+                                {/* URL — JetBrains Mono, middle-truncate via title */}
+                                <td className="max-w-[220px] px-4 py-2.5">
+                                    <div className="flex flex-col gap-0.5">
+                                        <span
+                                            className="block truncate font-mono text-xs text-primary"
+                                            title={row.url}
+                                            style={{ fontFamily: "'JetBrains Mono', monospace" }}
+                                        >
+                                            {displayPath}
+                                        </span>
+                                        {/* Open URL in new tab without triggering row click */}
+                                        <a
+                                            href={row.url}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            onClick={(e) => e.stopPropagation()}
+                                            className="inline-flex items-center gap-0.5 text-xs text-zinc-400 hover:text-zinc-600 w-fit"
+                                        >
+                                            <ExternalLink className="h-2.5 w-2.5" />
+                                            open
+                                        </a>
+                                    </div>
+                                </td>
+
+                                {/* Page type */}
+                                <td className="px-3 py-2.5">
+                                    <span className="rounded-full bg-zinc-100 px-2 py-px text-xs font-medium text-zinc-600">
+                                        {PAGE_TYPE_LABELS[row.page_type]}
+                                    </span>
+                                </td>
+
+                                {/* Speed score */}
+                                <td className="px-3 py-2.5 text-right">
+                                    <ScoreCell score={row.speed_score} band={row.score_band} />
+                                </td>
+
+                                {/* LCP */}
+                                <td className="px-3 py-2.5 text-right">
+                                    <div className="flex flex-col items-end gap-0.5">
+                                        <span className="tabular-nums text-sm text-zinc-700">{fmtMs(row.lcp_ms)}</span>
+                                        <CwvBand metric="lcp" value={row.lcp_ms} showLabel={false} className="h-1.5 w-8 rounded-full px-0 py-0" />
+                                    </div>
+                                </td>
+
+                                {/* INP */}
+                                <td className="px-3 py-2.5 text-right">
+                                    <div className="flex flex-col items-end gap-0.5">
+                                        <span className="tabular-nums text-sm text-zinc-700">{fmtMs(row.inp_ms)}</span>
+                                        <CwvBand metric="inp" value={row.inp_ms} showLabel={false} className="h-1.5 w-8 rounded-full px-0 py-0" />
+                                    </div>
+                                </td>
+
+                                {/* CLS */}
+                                <td className="px-3 py-2.5 text-right">
+                                    <div className="flex flex-col items-end gap-0.5">
+                                        <span className="tabular-nums text-sm text-zinc-700">{fmtCls(row.cls)}</span>
+                                        <CwvBand metric="cls" value={row.cls} showLabel={false} className="h-1.5 w-8 rounded-full px-0 py-0" />
+                                    </div>
+                                </td>
+
+                                {/* TTFB */}
+                                <td className="px-3 py-2.5 text-right">
+                                    <span className={cn(
+                                        'tabular-nums text-sm',
+                                        row.ttfb_ms <= 800 ? 'text-emerald-700' : row.ttfb_ms <= 1800 ? 'text-amber-700' : 'text-rose-700',
+                                    )}>
+                                        {fmtMs(row.ttfb_ms)}
+                                    </span>
+                                </td>
+
+                                {/* Ad Spend */}
+                                <td className="px-3 py-2.5 text-right">
+                                    <span className="tabular-nums text-sm text-zinc-700">
+                                        {row.ad_spend_28d !== null ? fmtCurrency(row.ad_spend_28d) : '—'}
+                                    </span>
+                                </td>
+
+                                {/* Score sparkline (30d) */}
+                                <td className="px-3 py-2.5 text-right">
+                                    <div className="flex justify-end">
+                                        <Sparkline
+                                            data={row.score_history.map((v) => ({ value: v }))}
+                                            color={
+                                                row.score_band === 'good'
+                                                    ? 'var(--color-success)'
+                                                    : row.score_band === 'needs-improvement'
+                                                    ? 'var(--color-warning)'
+                                                    : 'var(--color-danger)'
+                                            }
+                                            height={24}
+                                            mode="line"
+                                        />
+                                    </div>
+                                </td>
+
+                                {/* Source */}
+                                <td className="px-3 py-2.5">
+                                    <SourceChip source={row.source} />
+                                </td>
+                            </tr>
+                        );
+                    })}
+                </tbody>
+            </table>
+        </div>
+    );
+}
+
+// ─── Mobile fallback ───────────────────────────────────────────────────────────
+
+function MobileOnlyBanner() {
+    return (
+        <div className="mt-6 rounded-xl border border-zinc-200 bg-zinc-50 px-6 py-8 text-center">
+            <Monitor className="mx-auto mb-3 h-8 w-8 text-zinc-300" />
+            <p className="text-sm font-medium text-zinc-700">Full Performance report available on desktop</p>
+            <p className="mt-1 text-sm text-zinc-500">Open Nexstage on a screen wider than 1280px to see the URL table and trend charts.</p>
+        </div>
+    );
+}
+
+// ─── Main page ─────────────────────────────────────────────────────────────────
+
+export default function PerformanceIndex(props: Props) {
+    const {
+        from, to, kpis, trend, url_rows, quadrant_points, annotations, psi_connected,
+        total_urls, crux_url_count,
+    } = props;
+
+    const { workspace } = usePage<PageProps>().props;
+
+    // ── Filter state ──────────────────────────────────────────────────────────
+    const [filters, setFilters] = useState<Filters>({
+        device:     props.device ?? 'mobile',
+        pageType:   '',
+        scoreBand:  '',
+        hasAdSpend: false,
+        hasCrux:    false,
+        urlSearch:  '',
+    });
+
+    function updateFilters(partial: Partial<Filters>) {
+        setFilters((f) => ({ ...f, ...partial }));
+    }
+
+    // ── Drawer state ──────────────────────────────────────────────────────────
+    const [drawerRow, setDrawerRow] = useState<UrlRow | null>(null);
+
+    // ── Filtered rows (client-side — no full-page reload for filter changes) ──
+    const filteredRows = useMemo(() => {
+        return url_rows.filter((r) => {
+            if (filters.scoreBand && r.score_band !== filters.scoreBand) return false;
+            if (filters.hasAdSpend && !r.ad_spend_28d) return false;
+            if (filters.hasCrux && r.source !== 'crux') return false;
+            if (filters.pageType && r.page_type !== filters.pageType) return false;
+            if (filters.urlSearch) {
+                const q = filters.urlSearch.toLowerCase();
+                if (!r.url.toLowerCase().includes(q)) return false;
+            }
+            return true;
+        });
+    }, [url_rows, filters]);
+
+    // ── FilterChipSentence chips ───────────────────────────────────────────────
+    const filterChips = useMemo(() => {
+        const chips = [
+            { key: 'range', label: 'Range', value: `${from} – ${to}` },
+            { key: 'device', label: 'Device', value: filters.device === 'mobile' ? 'Mobile' : 'Desktop' },
+        ];
+        if (filters.scoreBand) {
+            const labels: Record<string, string> = {
+                'good': 'Good', 'needs-improvement': 'Needs Improvement', 'poor': 'Poor',
+            };
+            chips.push({ key: 'score_band', label: 'Score', value: labels[filters.scoreBand] ?? filters.scoreBand, removable: true } as typeof chips[0]);
+        }
+        if (filters.hasAdSpend) chips.push({ key: 'has_ad_spend', label: 'Filter', value: 'Has Ad Spend', removable: true } as typeof chips[0]);
+        if (filters.hasCrux)    chips.push({ key: 'has_crux',     label: 'Data',   value: 'CrUX only',   removable: true } as typeof chips[0]);
+        return chips;
+    }, [from, to, filters]);
+
+    function removeChip(key: string) {
+        if (key === 'score_band')   updateFilters({ scoreBand: '' });
+        if (key === 'has_ad_spend') updateFilters({ hasAdSpend: false });
+        if (key === 'has_crux')     updateFilters({ hasCrux: false });
+    }
+
+    // ── No PSI integration ─────────────────────────────────────────────────────
+    if (!psi_connected) {
+        return (
+            <AppLayout dateRangePicker={<DateRangePicker />}>
+                <Head title="Performance" />
+                <PageHeader title="Performance" subtitle="Core Web Vitals · PageSpeed Insights" />
+                <EmptyState
+                    icon={Gauge}
+                    title="No performance data yet"
+                    description="Connect Google Search Console or run a Lighthouse audit to see Core Web Vitals and speed scores for your store pages."
+                    action={{
+                        label: 'Set up integrations',
+                        href: wurl(workspace?.slug, '/integrations'),
+                    }}
+                />
             </AppLayout>
         );
     }
 
     return (
         <AppLayout dateRangePicker={<DateRangePicker />}>
-            <Head title="Site Performance" />
-            <div className="space-y-8">
+            <Head title="Performance" />
+
+            {/* ── CrUX field vs lab banner ── */}
+            <AlertBanner
+                severity="info"
+                message="CrUX data reflects real users over the last 28 days — not lab conditions. Lighthouse (lab) results may differ. URLs without sufficient traffic show Lab data only."
+                onDismiss={() => {}}
+                persistence={{ key: 'perf-crux-banner', storage: 'local' }}
+            />
+
+            <div className="px-0 py-6 space-y-6">
                 <PageHeader
-                    title="Site Performance"
-                    subtitle={selectedUrl?.label ? selectedUrl.url : undefined}
-                    action={
-                        <UrlSelector
-                            storeUrls={store_urls}
-                            selectedId={selected_url_id}
-                            from={from}
-                            to={to}
-                            navigate={navigate}
-                        />
-                    }
+                    title="Performance"
+                    subtitle={`Core Web Vitals · ${crux_url_count} of ${total_urls} URLs have CrUX field data`}
                 />
 
-                <PageNarrative text={narrative} />
+                {/* ── FilterChipSentence §5.4 ── */}
+                <FilterChipSentence
+                    entity="performance data"
+                    chips={filterChips}
+                    onRemove={removeChip}
+                />
 
-                {/* Regression alerts (collapsed by default) */}
-                <AlertsPanel alerts={performance_alerts} />
+                {/* ── KPI strip — 4 cards ── */}
+                <KpiGrid cols={4}>
+                    {kpis.map((kpi) => {
+                        const display = kpi.value !== null
+                            ? (kpi.unit === 'pct' ? `${kpi.value.toFixed(1)} %` : String(kpi.value))
+                            : '—';
 
-                {/* Revenue at risk hero card (§F19) */}
-                <section className="space-y-3">
-                    <h2 className="section-label">Revenue Impact</h2>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                        <MetricCard
-                            label="Estimated Revenue at Risk"
-                            value={revenue_at_risk > 0
-                                ? formatCurrency(revenue_at_risk, currency)
-                                : formatCurrency(0, currency)}
-                            source="real"
-                            tooltip="Estimate based on comparing current 7-day conversion rate vs 28-day baseline. Floor at 0."
-                            subtext={revenue_at_risk === 0 ? 'No slowness-driven risk detected' : undefined}
+                        return (
+                            <MetricCard
+                                key={kpi.label}
+                                label={`${kpi.label} (${kpi.qualifier})`}
+                                value={display}
+                                activeSource={kpi.source as 'gsc' | 'store'}
+                                availableSources={[kpi.source as 'gsc' | 'store']}
+                                change={kpi.delta_pct}
+                                sparklineData={kpi.sparkline.map((v) => ({ value: v }))}
+                                tooltip={
+                                    kpi.label === 'Good LCP URLs'
+                                        ? 'Percentage of tracked URLs with Largest Contentful Paint ≤ 2.5s in the 28-day CrUX window.'
+                                        : kpi.label === 'Good INP URLs'
+                                        ? 'Percentage of tracked URLs with Interaction to Next Paint ≤ 200ms in the 28-day CrUX window.'
+                                        : kpi.label === 'Good CLS URLs'
+                                        ? 'Percentage of tracked URLs with Cumulative Layout Shift ≤ 0.1 in the 28-day CrUX window.'
+                                        : 'Shopify composite speed score (0–100) combining Lighthouse scores for homepage and top landing pages.'
+                                }
+                            />
+                        );
+                    })}
+                </KpiGrid>
+
+                {/* ── CWV trend chart ── */}
+                <div className="rounded-xl border border-zinc-200 bg-white p-5">
+                    <div className="mb-1 flex items-center gap-2">
+                        <Activity className="h-4 w-4 text-zinc-400" />
+                        <span className="text-sm font-medium text-zinc-700">Core Web Vitals trend (12 weeks)</span>
+                    </div>
+                    <p className="mb-3 text-xs text-zinc-400">
+                        p75 field data — dotted right edge = current incomplete week. Annotations mark deploy events.
+                    </p>
+                    <div className="hidden lg:block">
+                        <CwvTrendChart data={trend} annotations={annotations} />
+                    </div>
+                    <div className="lg:hidden flex h-24 items-center justify-center text-sm text-zinc-400">
+                        Chart available on desktop.
+                    </div>
+                </div>
+
+                {/* ── URL performance table ── */}
+                <div className="rounded-xl border border-zinc-200 bg-white overflow-hidden">
+                    {/* Table toolbar */}
+                    <div className="border-b border-zinc-100 px-4 py-3">
+                        <div className="mb-3 flex items-center justify-between gap-3">
+                            <div className="flex items-center gap-2">
+                                <LayoutList className="h-4 w-4 text-zinc-400" />
+                                <span className="text-sm font-medium text-zinc-700">URL Performance</span>
+                                <span className="text-xs text-zinc-400">
+                                    {filteredRows.length} of {total_urls} URLs · default sort: worst first
+                                </span>
+                            </div>
+                        </div>
+                        <div className="hidden lg:block">
+                            <FilterBar filters={filters} onChange={updateFilters} />
+                        </div>
+                    </div>
+
+                    {/* Desktop: full table */}
+                    <div className="hidden lg:block min-h-[300px]">
+                        <PerformanceTable rows={filteredRows} onRowClick={setDrawerRow} />
+                    </div>
+
+                    {/* Mobile: simplified view */}
+                    <div className="lg:hidden">
+                        <MobileOnlyBanner />
+                    </div>
+                </div>
+
+                {/* ── QuadrantChart — Speed × ROAS (below the fold) ── */}
+                {quadrant_points.length > 0 && (
+                    <div className="hidden lg:block rounded-xl border border-zinc-200 bg-white p-5">
+                        <div className="mb-1 flex items-center gap-2">
+                            <Zap className="h-4 w-4 text-zinc-400" />
+                            <span className="text-sm font-medium text-zinc-700">Speed vs ROAS</span>
+                            <span className="text-xs text-zinc-400">· bubble size = ad spend · click a bubble to highlight in table</span>
+                        </div>
+                        <p className="mb-3 text-xs text-zinc-400">
+                            Quadrant 1 (fast + high ROAS) = keep investing. Quadrant 3 (slow + low ROAS) = fix speed before adding budget.
+                        </p>
+                        <QuadrantChart
+                            data={quadrant_points}
+                            config={{
+                                xLabel: 'Speed Score',
+                                yLabel: 'ROAS',
+                                sizeLabel: 'Ad Spend',
+                                xThreshold: 50,
+                                yThreshold: 2,
+                                topRightLabel:    'Fast + High ROAS',
+                                topLeftLabel:     'Slow + High ROAS',
+                                bottomRightLabel: 'Fast + Low ROAS',
+                                bottomLeftLabel:  'Slow + Low ROAS',
+                            }}
+                            onDotClick={(id) => {
+                                const row = url_rows.find((r) => r.id === id);
+                                if (row) setDrawerRow(row);
+                            }}
                         />
                     </div>
-                </section>
-
-                {/* No data yet */}
-                {!hasAnyData ? (
-                    <div className="rounded-2xl border border-zinc-200 bg-white p-10 text-center space-y-3">
-                        <div className="text-zinc-900 font-medium">Lighthouse check in progress</div>
-                        <div className="text-sm text-zinc-400 max-w-sm mx-auto">
-                            A PageSpeed Insights check was queued when this URL was added.
-                            Results typically appear within 2–5 minutes — refresh to check.
-                        </div>
-                        <button
-                            onClick={() => window.location.reload()}
-                            className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-zinc-50 px-4 py-2 text-sm font-medium text-zinc-600 hover:bg-zinc-100 transition-colors"
-                        >
-                            Refresh
-                        </button>
-                    </div>
-                ) : (
-                    <>
-                        {/* Mobile + Desktop columns */}
-                        <section className="space-y-3">
-                            <h2 className="section-label">
-                                Lighthouse Scores &amp; Core Web Vitals
-                            </h2>
-                            <div className="flex gap-6">
-                                <StrategyColumn label="Mobile"  scores={mobile_latest}  delta={mobile_score_delta} />
-                                <div className="w-px bg-zinc-100 self-stretch" />
-                                <StrategyColumn label="Desktop" scores={desktop_latest} delta={desktop_score_delta} />
-                            </div>
-                        </section>
-
-                        {/* Score trend chart */}
-                        {(mobile_history.length > 0 || desktop_history.length > 0) && (
-                            <section className="rounded-2xl border border-zinc-200 bg-white p-6 space-y-4">
-                                <h2 className="section-label">
-                                    Score Trend
-                                </h2>
-                                <ScoreTrendChart
-                                    mobileHistory={mobile_history}
-                                    desktopHistory={desktop_history}
-                                    holidays={holiday_overlays}
-                                    workspaceEvents={workspace_event_overlays}
-                                />
-                                {(holiday_overlays.length > 0 || workspace_event_overlays.length > 0) && (
-                                    <div className="flex flex-wrap gap-4 pt-1 text-xs text-zinc-400">
-                                        {holiday_overlays.length > 0 && (
-                                            <span className="flex items-center gap-1.5">
-                                                <span className="inline-block h-px w-4 border-t-2 border-dashed border-zinc-400" />
-                                                Holidays
-                                            </span>
-                                        )}
-                                        {workspace_event_overlays.length > 0 && (
-                                            <span className="flex items-center gap-1.5">
-                                                <span className="inline-block h-px w-4 border-t-2 border-dashed border-blue-400" />
-                                                Promotions
-                                            </span>
-                                        )}
-                                    </div>
-                                )}
-                            </section>
-                        )}
-
-                        {/* CWV trend chart */}
-                        {(mobile_history.length > 0 || desktop_history.length > 0) && (() => {
-                            const allHistory = [...mobile_history, ...desktop_history];
-                            const hasCrux = allHistory.some(
-                                (p) => p.crux_lcp_p75_ms != null || p.crux_inp_p75_ms != null || p.crux_cls_p75 != null
-                            );
-                            return (
-                                <section className="rounded-2xl border border-zinc-200 bg-white p-6 space-y-4">
-                                    <h2 className="section-label">Core Web Vitals Trend</h2>
-                                    <CwvTrendChart
-                                        mobileHistory={mobile_history}
-                                        desktopHistory={desktop_history}
-                                    />
-                                    <p className="text-xs text-zinc-400">
-                                        {hasCrux
-                                            ? 'Field data (p75) from Chrome User Experience Report — real users. Lab data from PageSpeed Insights shown as reference.'
-                                            : 'No real-user (CrUX) field data available for this URL yet — showing PageSpeed Insights lab estimates only.'}
-                                    </p>
-                                </section>
-                            );
-                        })()}
-
-                        {/* Audit drill-down (collapsed by default) */}
-                        <AuditDrillDown audits={performance_audits} />
-                    </>
-                )}
-
-                {/* URL summary table */}
-                {url_summary.length > 1 && (
-                    <section className="space-y-3">
-                        <h2 className="section-label">
-                            All Monitored URLs
-                        </h2>
-                        <div className="rounded-2xl border border-zinc-200 bg-white overflow-x-auto">
-                            <table className="w-full text-sm">
-                                <thead>
-                                    <tr className="border-b border-zinc-100 bg-zinc-50 text-left">
-                                        <th className="px-5 py-3 font-medium text-zinc-500">URL</th>
-                                        <th className="px-4 py-3 font-medium text-zinc-500 text-center" colSpan={3}>Mobile</th>
-                                        <th className="px-4 py-3 font-medium text-zinc-500 text-center" colSpan={2}>Desktop</th>
-                                        <th className="px-4 py-3 font-medium text-zinc-500 text-right">Monthly Orders</th>
-                                        <th className="px-4 py-3 font-medium text-zinc-500 text-right">Revenue Risk</th>
-                                        <th className="px-4 py-3 font-medium text-zinc-500 text-right">Checked</th>
-                                    </tr>
-                                    <tr className="border-b border-zinc-100 bg-zinc-50/50 text-left">
-                                        <th />
-                                        <th className="px-4 pb-2 text-xs font-normal text-zinc-400 text-center">Perf</th>
-                                        <th className="px-4 pb-2 text-xs font-normal text-zinc-400 text-center">LCP</th>
-                                        <th className="px-4 pb-2 text-xs font-normal text-zinc-400 text-center">INP</th>
-                                        <th className="px-4 pb-2 text-xs font-normal text-zinc-400 text-center">Perf</th>
-                                        <th className="px-4 pb-2 text-xs font-normal text-zinc-400 text-center">LCP</th>
-                                        <th />
-                                        <th />
-                                        <th />
-                                    </tr>
-                                </thead>
-                                <tbody className="divide-y divide-zinc-100">
-                                    {url_summary.map((row) => (
-                                        <tr
-                                            key={row.id}
-                                            className={cn('hover:bg-zinc-50 cursor-pointer', row.id === selected_url_id && 'bg-zinc-50')}
-                                            onClick={() => navigate({ url_id: row.id, from, to })}
-                                        >
-                                            <td className="px-5 py-3 max-w-[240px]">
-                                                <div className="font-medium text-zinc-800 truncate">
-                                                    {row.label ?? row.url}
-                                                    {row.is_homepage && <span className="ml-1.5 text-xs text-zinc-400">homepage</span>}
-                                                </div>
-                                                {row.label && (
-                                                    <div className="text-xs text-zinc-400 truncate">{row.url}</div>
-                                                )}
-                                            </td>
-                                            <td className="px-4 py-3 text-center"><ScoreBadge score={row.mobile_performance_score} /></td>
-                                            <td className="px-4 py-3 text-center text-zinc-600 tabular-nums text-xs">{fmtMs(row.mobile_lcp_ms)}</td>
-                                            <td className="px-4 py-3 text-center">
-                                                <CwvBand metric="inp" value={row.mobile_inp_ms} />
-                                            </td>
-                                            <td className="px-4 py-3 text-center"><ScoreBadge score={row.desktop_performance_score} /></td>
-                                            <td className="px-4 py-3 text-center text-zinc-600 tabular-nums text-xs">{fmtMs(row.desktop_lcp_ms)}</td>
-                                            <td className="px-4 py-3 text-right tabular-nums text-zinc-700">
-                                                {row.monthly_orders > 0 ? row.monthly_orders : '—'}
-                                            </td>
-                                            <td className={cn(
-                                                'px-4 py-3 text-right tabular-nums text-sm font-medium',
-                                                row.revenue_risk > 0 ? 'text-amber-600' : 'text-zinc-300',
-                                            )}>
-                                                {row.revenue_risk > 0
-                                                    ? formatCurrency(row.revenue_risk, currency)
-                                                    : '—'}
-                                            </td>
-                                            <td className="px-4 py-3 text-right text-zinc-400 text-xs">
-                                                {row.last_checked_at ? fmtDate(row.last_checked_at) : '—'}
-                                            </td>
-                                        </tr>
-                                    ))}
-                                </tbody>
-                            </table>
-                        </div>
-                    </section>
                 )}
             </div>
+
+            {/* ── Lighthouse detail drawer ── */}
+            <LighthouseDrawer
+                row={drawerRow}
+                open={drawerRow !== null}
+                onClose={() => setDrawerRow(null)}
+            />
         </AppLayout>
     );
 }

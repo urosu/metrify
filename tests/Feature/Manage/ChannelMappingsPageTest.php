@@ -14,6 +14,7 @@ use App\Services\Attribution\ChannelClassifierService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Queue;
+use Tests\Concerns\WithOnboardedWorkspace;
 use Tests\TestCase;
 
 /**
@@ -34,26 +35,12 @@ use Tests\TestCase;
 class ChannelMappingsPageTest extends TestCase
 {
     use RefreshDatabase;
-
-    private User $user;
-    private Workspace $workspace;
+    use WithOnboardedWorkspace;
 
     protected function setUp(): void
     {
         parent::setUp();
-
-        $this->user      = User::factory()->create();
-        $this->workspace = Workspace::factory()->create(['owner_id' => $this->user->id]);
-
-        WorkspaceUser::factory()->owner()->create([
-            'user_id'      => $this->user->id,
-            'workspace_id' => $this->workspace->id,
-        ]);
-
-        Store::factory()->create([
-            'workspace_id'             => $this->workspace->id,
-            'historical_import_status' => 'completed',
-        ]);
+        $this->setUpOnboardedWorkspace();
     }
 
     // ── Tests ────────────────────────────────────────────────────────────────

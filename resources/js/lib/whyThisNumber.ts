@@ -167,7 +167,7 @@ export function whyPerformanceScore(): WhyThisNumberData {
     return {
         title: 'How Performance Score is computed',
         formula: 'Performance Score = Lighthouse v10 lab score (0–100) for your homepage using the mobile strategy\n\nPowered by PageSpeed Insights API. Score ≥ 90 = good, 50–89 = needs improvement, < 50 = poor.',
-        sources: ['site'],
+        sources: ['ga4'],
     };
 }
 
@@ -175,7 +175,7 @@ export function whyLcp(): WhyThisNumberData {
     return {
         title: 'How LCP is measured',
         formula: 'LCP = Largest Contentful Paint — time until the largest visible element finishes loading\n\nTarget: ≤ 2.5 s (good), ≤ 4.0 s (needs improvement), > 4.0 s (poor). Measured by Lighthouse.',
-        sources: ['site'],
+        sources: ['ga4'],
     };
 }
 
@@ -183,7 +183,7 @@ export function whyCls(): WhyThisNumberData {
     return {
         title: 'How CLS is measured',
         formula: 'CLS = Cumulative Layout Shift — total unexpected layout movement during page load\n\nTarget: ≤ 0.1 (good), ≤ 0.25 (needs improvement), > 0.25 (poor). Lower = more stable.',
-        sources: ['site'],
+        sources: ['ga4'],
     };
 }
 

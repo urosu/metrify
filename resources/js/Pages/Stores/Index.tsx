@@ -7,7 +7,6 @@ import AppLayout from '@/Components/layouts/AppLayout';
 import { PageHeader } from '@/Components/shared/PageHeader';
 import { StatusBadge } from '@/Components/shared/StatusBadge';
 import { formatCurrency } from '@/lib/formatters';
-import { cn } from '@/lib/utils';
 import type { PageProps } from '@/types';
 
 interface StoreListItem {
@@ -28,16 +27,9 @@ interface StoreListItem {
     wl_tag: 'winner' | 'loser' | null;
 }
 
-type WlClassifier = 'target' | 'peer' | 'period';
-
 interface Props extends PageProps {
     stores: StoreListItem[];
     stores_total_count: number;
-    workspace_target_marketing_pct: number | null;
-    wl_has_target: boolean;
-    active_classifier: WlClassifier;
-    filter: 'all' | 'winners' | 'losers';
-    classifier: WlClassifier | null;
 }
 
 function formatRelativeTime(iso: string | null): string {
@@ -52,76 +44,13 @@ function formatRelativeTime(iso: string | null): string {
     return `${days}d ago`;
 }
 
-function classifierLabel(c: WlClassifier): string {
-    return c === 'target' ? 'vs Target' : c === 'peer' ? 'vs Peer Avg' : 'vs Prev Period';
-}
-
-function WlClassifierDropdown({
-    active,
-    hasTarget,
-    onChange,
-}: {
-    active: WlClassifier;
-    hasTarget: boolean;
-    onChange: (c: WlClassifier) => void;
-}) {
-    const options: { value: WlClassifier; disabled?: boolean }[] = [
-        { value: 'target', disabled: !hasTarget },
-        { value: 'peer' },
-        { value: 'period' },
-    ];
-
-    return (
-        <select
-            value={active}
-            onChange={e => onChange(e.target.value as WlClassifier)}
-            className="rounded-md border border-zinc-200 bg-white px-2 py-1 text-xs text-zinc-600 focus:outline-none focus:ring-1 focus:ring-primary"
-            title="Classification method for Winners / Losers"
-        >
-            {options.map(o => (
-                <option key={o.value} value={o.value} disabled={o.disabled}>
-                    {classifierLabel(o.value)}{o.disabled ? ' (no target set)' : ''}
-                </option>
-            ))}
-        </select>
-    );
-}
-
 export default function StoresIndex({
     stores,
     stores_total_count,
-    workspace_target_marketing_pct,
-    wl_has_target,
-    active_classifier,
-    filter,
-    classifier,
 }: Props) {
     const { workspace } = usePage<PageProps>().props;
     const currency = workspace?.reporting_currency ?? 'EUR';
     const w = (path: string) => wurl(workspace?.slug, path);
-
-    const storesUrl = wurl(workspace?.slug, '/stores');
-
-    function navigate(params: Record<string, string | undefined>) {
-        router.get(storesUrl, params as Record<string, string>, { preserveState: true, replace: true });
-    }
-
-    function setFilter(f: 'all' | 'winners' | 'losers') {
-        navigate({
-            ...(f !== 'all'         ? { filter: f }          : {}),
-            ...(classifier !== null ? { classifier: classifier } : {}),
-        });
-    }
-
-    function setClassifier(c: WlClassifier) {
-        navigate({
-            ...(filter !== 'all' ? { filter } : {}),
-            classifier: c,
-        });
-    }
-
-    // Chips are always shown when there are stores; classifier dropdown always available.
-    const showFilterChips = stores_total_count > 0;
 
     // Poll every 5 s while any store has an import in progress.
     useEffect(() => {
@@ -161,49 +90,6 @@ export default function StoresIndex({
                 </div>
             ) : (
                 <>
-                    {/* Winners / Losers chips — server-side filtered.
-                        Metric: marketing_pct (lower = more efficient = winner).
-                        See: PLANNING.md section 15 (Winners/Losers classifier) */}
-                    {showFilterChips && (
-                        <div className="mb-3 flex items-center gap-2">
-                            <div className="flex items-center gap-1">
-                                {(['all', 'winners', 'losers'] as const).map(f => (
-                                    <button
-                                        key={f}
-                                        onClick={() => setFilter(f)}
-                                        className={cn(
-                                            'rounded-full border px-3 py-1 text-xs font-medium transition-colors',
-                                            filter === f
-                                                ? f === 'winners'
-                                                    ? 'border-green-300 bg-green-50 text-green-700'
-                                                    : f === 'losers'
-                                                    ? 'border-red-300 bg-red-50 text-red-700'
-                                                    : 'border-primary bg-primary/10 text-primary'
-                                                : 'border-zinc-200 text-zinc-500 hover:border-zinc-300 hover:text-zinc-700',
-                                        )}
-                                        title={
-                                            f === 'all'     ? 'Show all stores' :
-                                            f === 'winners' ? 'Marketing % below benchmark (efficient spend)' :
-                                                              'Marketing % at or above benchmark'
-                                        }
-                                    >
-                                        {f === 'all' ? 'All' : f === 'winners' ? 'Winners' : 'Losers'}
-                                    </button>
-                                ))}
-                                {filter !== 'all' && (
-                                    <span className="text-xs text-zinc-400">
-                                        {stores.length} / {stores_total_count}
-                                    </span>
-                                )}
-                            </div>
-                            <WlClassifierDropdown
-                                active={active_classifier}
-                                hasTarget={wl_has_target}
-                                onChange={setClassifier}
-                            />
-                        </div>
-                    )}
-
                     <div className="rounded-xl border border-zinc-200 bg-white overflow-hidden">
                         <table className="w-full text-sm">
                             <thead>

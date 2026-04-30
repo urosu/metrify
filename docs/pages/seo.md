@@ -27,13 +27,13 @@ The page is deliberately NOT an SEO tool. We do not rewrite meta tags, audit tec
 | Store (slate-500) | Optional | `orders` joined by landing_path to a query → order path where UTMs carry `utm_medium=organic` | Same as `/orders` (real-time-ish) |
 | Facebook (indigo-500) | N/A — greyed on this page | — | — |
 | Google Ads (amber-500) | N/A — greyed on this page | — | — |
-| Site (violet-500) | N/A — greyed on this page | — | — |
-| Real (yellow-400) | N/A — greyed on this page (pre-click surface) | — | — |
+| GA4 (violet-500) | N/A — not shown on this page | — | — |
+| Real (zinc-500) | N/A — not shown on this page (pre-click surface) | — | — |
 
 Notes on source behavior specific to this page:
 
-- Every other SourceBadge (Facebook, Google Ads, Site, Real) is rendered greyed on every card with tooltip "Not applicable on /seo — SEO is pre-click".
-- Global `AttributionModelSelector`, `WindowSelector`, `AccountingModeSelector`, and `ProfitMode` all grey out on this route per UX §7 because GSC is a pre-click impression/ranking surface with no attribution or accounting concept.
+- Source controls (Facebook, Google Ads, GA4, Real) are not shown on this page — SEO is a pre-click surface with a single source (GSC). No source toggle rendered here.
+- In-page `AttributionModelSelector`, `WindowSelector`, `AccountingModeSelector`, and `ProfitMode` are not rendered on this route — GSC is a pre-click impression/ranking surface with no attribution or accounting concept.
 - `BreakdownSelector` on this page is restricted to: **None · Country · Device · Search Appearance · Page**. Channel / Campaign / Ad set / Customer segment are greyed with tooltip explaining GSC scope.
 - `search_console_daily_rollups` uses GSC API v1 with `dataState=final` to avoid pulling provisional numbers into our cache; provisional last-48h data is rendered via a separate nightly `dataState=all` pull stored under a paired `*_api_version` column (see CLAUDE.md JSONB rules).
 
@@ -112,7 +112,7 @@ Notes on source behavior specific to this page:
 - **Right-click any query or page cell** → `ContextMenu` (§5.21) with a page-specific escape hatch "Open in Google Search Console" that deep-links to `https://search.google.com/search-console/performance/search-analytics?...` with the current query/page and date range prefilled, alongside the standard "Filter to this / Exclude this / Copy value / Copy link" actions.
 - **`FreshnessIndicator` (§5.20) popover** on this page prominently shows the GSC row with `Delayed (Google 48h delay)` as the honest status chip — never rendered as "Healthy" even when the sync itself succeeded. The freshness copy carries the explicit latency: "GSC last synced 14 min ago · Google returns data with ~48h delay".
 - **Low-volume queries render with `ConfidenceChip` (§5.27)** — any query with <1000 impressions in the range shows "Based on N impressions — low confidence" and has its Position Δ and Clicks Δ suppressed (GSC position is statistically noisy at small sample). The threshold is workspace-configurable in Settings → Confidence.
-- **`ProfitMode` is greyed** with tooltip "Profit requires click + order data — not applicable to pre-click search surface". Same treatment for `AttributionModelSelector`, `WindowSelector`, `AccountingModeSelector`, and the Store/Facebook/Google/Site/Real badges on each MetricCard.
+- **`ProfitMode` is not rendered on this page** — not applicable to pre-click search surface. Same for `AttributionModelSelector`, `WindowSelector`, `AccountingModeSelector`. No source badges on MetricCards on this page (single GSC source only).
 - `CommandPalette` (Cmd+K) scope on this page: typing any query string jumps directly to its DrawerSidePanel; typing a URL path jumps to the Pages tab filtered to that path.
 - **`ShareSnapshotButton` (§5.29) edge case**: snapshots from `/seo` with a range ending in the last 48h bake in a dashed "Contains provisional GSC data — pulled at [timestamp]" footer, so recipients don't panic at a dip that later filled in.
 - **Click a chart point** → drills into the Queries tab filtered to that date's top queries (UX §6 click-hierarchy); right-click adds an annotation at that date (UX §5.6.1).

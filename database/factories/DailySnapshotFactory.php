@@ -19,16 +19,16 @@ class DailySnapshotFactory extends Factory
     public function definition(): array
     {
         return [
-            'workspace_id'       => Workspace::factory(),
-            'store_id'           => Store::factory(),
-            'date'               => today(),
-            'orders_count'       => 10,
-            'revenue'            => 1000.00,
-            'revenue_native'     => 1000.00,
-            'aov'                => 100.00,
-            'items_sold'         => 15,
-            'items_per_order'    => 1.50,
-            'new_customers'      => 8,
+            'workspace_id'        => Workspace::factory(),
+            'store_id'            => Store::factory(),
+            'date'                => today(),
+            'orders_count'        => 10,
+            'revenue'             => 1000.00,
+            'revenue_native'      => 1000.00,
+            // aov is not a column — computed at query-time as revenue / NULLIF(orders_count, 0).
+            // items_per_order was dropped — compute at query-time as items_sold / NULLIF(orders_count, 0).
+            'items_sold'          => 15,
+            'new_customers'       => 8,
             'returning_customers' => 2,
         ];
     }

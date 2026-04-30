@@ -29,8 +29,12 @@ interface LineChartProps {
     compareLabel?: string;
     /** When true, Y-axis uses formatNumber instead of formatCurrency */
     valueType?: 'currency' | 'number' | 'percent';
-    /** Annotate specific dates with a subtle reference line + amber marker */
-    notes?: Array<{ date: string; note: string }>;
+    /**
+     * Annotate specific dates with a subtle reference line + amber marker.
+     * Accepts the canonical `{ date, note }` shape OR the `chart_annotations`
+     * shape from the controller (`{ date, label, type? }`).
+     */
+    notes?: Array<{ date: string; note?: string; label?: string; type?: string }>;
     loading?: boolean;
     className?: string;
 }
@@ -192,22 +196,25 @@ const LineChartWrapper = React.memo(function LineChartWrapper({
                         dot={false}
                         connectNulls
                     />
-                    {notes?.map(({ date, note }) => (
+                    {notes?.map((annotation) => {
+                        const text = annotation.note ?? annotation.label ?? '';
+                        return (
                         <ReferenceLine
-                            key={date}
-                            x={date}
+                            key={annotation.date}
+                            x={annotation.date}
                             stroke="#d4d4d8"
                             strokeDasharray="3 3"
                             strokeWidth={1}
                             label={(props: object) => (
                                 <NoteMarker
                                     {...(props as NoteMarkerProps)}
-                                    note={note}
+                                    note={text}
                                     onHoverChange={setHoveredNote}
                                 />
                             )}
                         />
-                    ))}
+                        );
+                    })}
             </RechartsLineChart>}
         </div>
     );

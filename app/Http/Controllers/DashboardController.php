@@ -4,1219 +4,483 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers;
 
-use App\Models\AdInsight;
-use App\Models\AiSummary;
-use App\Models\Alert;
-use App\Models\DailyNote;
-use App\Models\DailySnapshot;
-use App\Models\GscDailyStat;
-use App\Models\Holiday;
-use App\Models\HourlySnapshot;
-use App\Models\LighthouseSnapshot;
-use App\Models\Order;
-use App\Models\OrderItem;
-use App\Models\Store;
-use App\Models\StoreUrl;
-use App\Models\UptimeDailySummary;
-use App\Models\Workspace;
-use App\Models\WorkspaceEvent;
-use App\Services\NarrativeTemplateService;
-use App\Services\ProfitCalculator;
-use App\Services\RevenueAttributionService;
 use App\Services\WorkspaceContext;
+use App\Models\Workspace;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
 use Inertia\Inertia;
 use Inertia\Response;
 
 /**
- * Builds the cross-channel command center (Overview / Dashboard).
+ * DashboardController — Wave 1 rebuild.
  *
- * Data flow:
- *   Triggered by: GET /dashboard
- *   Reads from: daily_snapshots, hourly_snapshots, ad_insights, gsc_daily_stats, orders, alerts
- *   Returns: priority-tier metrics for Hero row + Store/Paid/Organic/Site sections
+ * Renders the cross-channel command center at GET /{workspace:slug}/.
+ * Serves realistic mock data shaped for the new six-source thesis layout:
+ *   TrustBar · KpiGrid (8 MetricCardDetail) · TodaySoFar · Revenue trend
+ *   · Targets row · ActivityFeed · AlertBanners
  *
- * Related: resources/js/Pages/Dashboard.tsx (priority-tier layout)
- * See: PLANNING.md "Dashboard — Cross-Channel Command Center"
+ * All values are mock — no DB queries in this stub.
+ * Real data wiring follows in the backend layer (L3 of PLANNING.md).
+ *
+ * @see docs/pages/dashboard.md
+ * @see docs/UX.md §5.14 TrustBar
+ * @see docs/UX.md §5.1 MetricCard
+ * @see docs/planning/backend.md
  */
 class DashboardController extends Controller
 {
-    public function __construct(
-        private readonly RevenueAttributionService $attribution,
-        private readonly NarrativeTemplateService  $narrative,
-    ) {}
-
     public function __invoke(Request $request): Response
     {
         $workspaceId = app(WorkspaceContext::class)->id();
         $workspace   = Workspace::withoutGlobalScopes()->findOrFail($workspaceId);
 
-        $validated = $request->validate([
-            'from'         => ['sometimes', 'nullable', 'date_format:Y-m-d'],
-            'to'           => ['sometimes', 'nullable', 'date_format:Y-m-d', 'after_or_equal:from'],
-            'compare_from' => ['sometimes', 'nullable', 'date_format:Y-m-d'],
-            'compare_to'   => ['sometimes', 'nullable', 'date_format:Y-m-d', 'after_or_equal:compare_from'],
-            'granularity'  => ['sometimes', 'nullable', 'in:hourly,daily,weekly'],
-            'store_ids'    => ['sometimes', 'nullable', 'string'],
-        ]);
+        $now = Carbon::now();
 
-        $from        = $validated['from']         ?? now()->subDays(29)->toDateString();
-        $to          = $validated['to']           ?? now()->toDateString();
-        $compareFrom = $validated['compare_from'] ?? null;
-        $compareTo   = $validated['compare_to']   ?? null;
-        $granularity = $validated['granularity']  ?? 'daily';
-        $storeIds     = $this->parseStoreIds($validated['store_ids'] ?? '', $workspaceId);
-        $stores       = Store::withoutGlobalScopes()->where('workspace_id', $workspaceId)->get();
-        $costSettings = ProfitCalculator::settingsForStores($storeIds, $stores);
+        // ── Comparison mode detection
+        // URL params: compare_from, compare_to (set by DateRangePicker → useDateRange)
+        $cmpFrom = $request->query('compare_from');
+        $cmpTo   = $request->query('compare_to');
+        $hasComparison = !empty($cmpFrom) && !empty($cmpTo);
 
-        // Compute primary metrics (store + paid + attribution).
-        // Always run even if has_store is false — user might have only ads connected.
-        $metrics        = $this->computeMetrics($workspaceId, $from, $to, $storeIds);
-        $compareMetrics = ($compareFrom && $compareTo)
-            ? $this->computeMetrics($workspaceId, $compareFrom, $compareTo, $storeIds)
-            : null;
-
-        // GSC metrics: only useful when GSC is connected. Run regardless so the
-        // organic row can show "not connected" state based on has_gsc flag.
-        $gscMetrics        = $workspace->has_gsc
-            ? $this->computeGscMetrics($workspaceId, $from, $to)
-            : null;
-        $compareGscMetrics = ($workspace->has_gsc && $compareFrom && $compareTo)
-            ? $this->computeGscMetrics($workspaceId, $compareFrom, $compareTo)
-            : null;
-
-        // PSI metrics: latest mobile snapshot for any homepage URL in the workspace.
-        // Phase 1 placeholder metrics are replaced by real data here.
-        // See: PLANNING.md "Performance Monitoring"
-        $psiMetrics = $workspace->has_psi
-            ? $this->computePsiMetrics($workspaceId)
-            : null;
-
-        $chartData        = $this->buildChartData($workspaceId, $from, $to, $granularity, $storeIds);
-        $compareChartData = ($compareFrom && $compareTo)
-            ? $this->buildChartData($workspaceId, $compareFrom, $compareTo, $granularity, $storeIds)
-            : null;
-
-        // Attention indicator: highest-priority unresolved, visible alert.
-        // Phase 2: this will be populated by DetectAnomaliesJob. Currently null until anomaly detection runs.
-        $topAlert = Alert::withoutGlobalScopes()
-            ->where('workspace_id', $workspaceId)
-            ->whereNull('resolved_at')
-            ->where('is_silent', false)
-            ->select(['type', 'severity', 'created_at'])
-            ->orderByRaw("CASE severity WHEN 'critical' THEN 1 WHEN 'warning' THEN 2 ELSE 3 END")
-            ->orderBy('created_at', 'desc')
-            ->first();
-
-        // How many distinct dates of snapshot data we have — used for the
-        // "anomaly detection learning your baseline: X/28 days" progress indicator.
-        $daysOfData = DailySnapshot::withoutGlobalScopes()
-            ->where('workspace_id', $workspaceId)
-            ->distinct('date')
-            ->count('date');
-
-        // When no snapshots exist yet, count raw orders so the UI can show
-        // "X orders imported — snapshots are being built" instead of a silent 0,00€.
-        // Only runs on day-1 (days_of_data === 0) to avoid the overhead on normal loads.
-        $rawOrdersCount = ($daysOfData === 0)
-            ? Order::withoutGlobalScopes()
-                ->where('workspace_id', $workspaceId)
-                ->whereIn('status', ['completed', 'processing'])
-                ->count()
-            : 0;
-
-        $aiSummary = AiSummary::withoutGlobalScopes()
-            ->where('workspace_id', $workspaceId)
-            ->where('date', now()->toDateString())
-            ->select(['summary_text', 'generated_at'])
-            ->first();
-
-        $nullFxQuery = Order::withoutGlobalScopes()
-            ->where('workspace_id', $workspaceId)
-            ->whereBetween('occurred_at', [$from . ' 00:00:00', $to . ' 23:59:59'])
-            ->whereIn('status', ['completed', 'processing'])
-            ->whereNull('total_in_reporting_currency');
-        if (! empty($storeIds)) {
-            $nullFxQuery->whereIn('store_id', $storeIds);
-        }
-        $hasNullFx = $nullFxQuery->exists();
-
-        // Apply scope-aware annotation filtering: workspace-scoped notes always show;
-        // store-scoped notes only show when the matching store is in the active filter.
-        // @see PLANNING.md section 8 (scope-aware annotations)
-        $notes = DailyNote::withoutGlobalScopes()
-            ->where('workspace_id', $workspaceId)
-            ->whereBetween('date', [$from, $to])
-            ->forAnnotationScope($storeIds)
-            ->select(['date', 'note'])
-            ->get()
-            ->map(fn ($n) => ['date' => $n->date->toDateString(), 'note' => $n->note])
-            ->all();
-
-        // Holiday overlays: fetch from global holidays table for workspace's country.
-        // Why: chart shows a gray vertical marker on holiday dates so users can
-        // explain traffic/revenue dips without reaching for anomaly detection.
-        // When holiday_lead_days > 0, future holidays are shifted left so the marker
-        // appears X days before the actual holiday (ad ramp-up window).
-        $leadDays = $workspace->workspace_settings->holidayLeadDays;
-        $today    = now()->toDateString();
-        // Query window shifted forward by lead_days so holidays whose marker date (actual − lead_days)
-        // falls within [$from, $to] are all captured.
-        $queryFrom = $leadDays > 0 ? Carbon::parse($from)->addDays($leadDays)->toDateString() : $from;
-        $queryTo   = $leadDays > 0 ? Carbon::parse($to)->addDays($leadDays)->toDateString()   : $to;
-        $holidays = $workspace->country
-            ? Holiday::whereBetween('date', [$queryFrom, $queryTo])
-                ->where('country_code', $workspace->country)
-                ->select(['date', 'name', 'type'])
-                ->orderBy('date')
-                ->get()
-                ->map(function ($h) use ($leadDays, $today) {
-                    $actualDate  = $h->date->toDateString();
-                    $displayDate = $leadDays > 0
-                        ? $h->date->copy()->subDays($leadDays)->toDateString()
-                        : $actualDate;
-
-                    return [
-                        'date'        => $displayDate,
-                        'name'        => $h->name,
-                        'type'        => $h->type,
-                        'is_upcoming' => $leadDays > 0 && $actualDate > $today,
-                        'lead_days'   => $leadDays,
-                        // Shown in the label so the user knows what they're advertising for.
-                        'actual_date' => $leadDays > 0 ? $h->date->format('M j') : null,
-                    ];
-                })
-                ->all()
-            : [];
-
-        // Workspace event overlays: promotions and expected spikes/drops created manually.
-        // Fetch events overlapping the date range (can start before $from or end after $to).
-        // Scope filter applied: workspace-wide events always show; store/integration events
-        // only show when the matching entity is in the active filter selection.
-        $workspaceEvents = WorkspaceEvent::withoutGlobalScopes()
-            ->where('workspace_id', $workspaceId)
-            ->where('date_from', '<=', $to)
-            ->where('date_to', '>=', $from)
-            ->forAnnotationScope($storeIds)
-            ->select(['date_from', 'date_to', 'name', 'event_type'])
-            ->orderBy('date_from')
-            ->get()
-            ->map(fn ($e) => [
-                'date_from'  => $e->date_from->toDateString(),
-                'date_to'    => $e->date_to->toDateString(),
-                'name'       => $e->name,
-                'event_type' => $e->event_type,
-            ])
-            ->all();
-
-        // Advanced paid metrics for the "Show advanced" toggle (CPM, CPC, platform conversion rate).
-        // Only computed when ads are connected — avoids unnecessary queries.
-        $advancedPaidMetrics = $workspace->has_ads
-            ? $this->computeAdvancedPaidMetrics($workspaceId, $from, $to)
-            : null;
-        $compareAdvancedPaidMetrics = ($workspace->has_ads && $compareFrom && $compareTo)
-            ? $this->computeAdvancedPaidMetrics($workspaceId, $compareFrom, $compareTo)
-            : null;
-
-        // Workspace targets — used by the Real row MetricCards for target notation.
-        // See: PLANNING.md "Source-Tagged MetricCard — UI Primitive"
-        $targets = [
-            'roas'           => $workspace->target_roas           ? (float) $workspace->target_roas           : null,
-            'cpo'            => $workspace->target_cpo            ? (float) $workspace->target_cpo            : null,
-            'marketing_pct'  => $workspace->target_marketing_pct  ? (float) $workspace->target_marketing_pct  : null,
-        ];
-
-        // Not Tracked banner: dismissed flag stored in user's view_preferences.
-        // Banner fires once per workspace until user explicitly dismisses it.
-        // Why: negative Not Tracked (>5% threshold) is the highest-value trust moment in the product.
-        $user = auth()->user();
-        $viewPrefs = $user?->view_preferences ?? [];
-        $notTrackedBannerDismissed = (bool) ($viewPrefs["not_tracked_banner_dismissed_{$workspaceId}"] ?? false);
-
-        // UTM coverage health — green/amber/red indicator near attribution metrics.
-        // Populated by ComputeUtmCoverageJob (runs on connect + nightly).
-        // Only shown when workspace has both store + ads.
-        $utmCoverage = ($workspace->has_store && $workspace->has_ads) ? [
-            'pct'                => $workspace->utm_coverage_pct    ? (float) $workspace->utm_coverage_pct : null,
-            'status'             => $workspace->utm_coverage_status ?? null,
-            'checked_at'         => $workspace->utm_coverage_checked_at?->toDateTimeString(),
-            'unrecognized_sources' => $workspace->utm_unrecognized_sources ?? [],
-        ] : null;
-
-        // 14-day trend dots for Real row MetricCards (only computed when targets are set).
-        $trendDots = $this->computeTrendDots($workspaceId, $targets, $storeIds);
-
-        // "Last 7 days vs prior 7 days" delta widget — only when store is connected.
-        $dailyAvgDelta = $workspace->has_store
-            ? $this->computeDailyAvgDelta($workspaceId, $storeIds)
-            : null;
-
-        // Latest orders feed — webhook-gated; null when no stores connected.
-        $recentOrders = $workspace->has_store
-            ? $this->computeRecentOrders($workspaceId, $storeIds)
-            : null;
-
-        // Phase 3.6 — Home: Today's Attention, Contribution Margin, Channel roll-up, Uptime.
-        $attentionItems  = $this->computeTodaysAttention($workspaceId);
-        $cm              = $this->computeContributionMargin(
-            $workspaceId, $from, $to, $storeIds, $metrics['ad_spend'] ?? 0, $costSettings,
-        );
-        $channelRollup   = $this->computeChannelRollup($workspaceId, $from, $to, $metrics['ad_spend'] ?? 0);
-        $uptime30dPct    = UptimeDailySummary::withoutGlobalScopes()
-            ->where('workspace_id', $workspaceId)
-            ->where('date', '>=', now()->subDays(30)->toDateString())
-            ->avg('uptime_pct');
-
-        // Page narrative — uses same-weekday-last-week comparison when the selected range
-        // ends today (the most common case). For custom ranges, comparison label is null.
+        // Derive human-readable comparison label
         $comparisonLabel = null;
-        $compareRevenueForNarrative = null;
-        $sameWeekdayMetrics = null;
-        if ($to === now()->toDateString()) {
-            $weekdayName              = now()->format('l'); // e.g. "Wednesday"
-            $comparisonLabel          = "last {$weekdayName}";
-            $sameWeekdayDate          = now()->subDays(7)->toDateString();
-            $sameWeekdayMetrics       = $this->computeMetrics($workspaceId, $sameWeekdayDate, $sameWeekdayDate, $storeIds);
-            $compareRevenueForNarrative = $sameWeekdayMetrics['revenue'] > 0 ? $sameWeekdayMetrics['revenue'] : null;
-        } elseif ($compareMetrics !== null) {
-            $comparisonLabel          = 'prior period';
-            $compareRevenueForNarrative = $compareMetrics['revenue'] > 0 ? $compareMetrics['revenue'] : null;
-        }
+        if ($hasComparison) {
+            $primaryFrom = $request->query('from', $now->copy()->subDays(6)->format('Y-m-d'));
+            $primaryTo   = $request->query('to', $now->format('Y-m-d'));
+            $pf = Carbon::parse($primaryFrom);
+            $pt = Carbon::parse($primaryTo);
+            $cf = Carbon::parse($cmpFrom);
 
-        $pageNarrative = $this->narrative->forDashboard(
-            revenue:          $metrics['revenue'] > 0 ? $metrics['revenue'] : null,
-            compareRevenue:   $compareRevenueForNarrative,
-            comparisonLabel:  $comparisonLabel,
-            roas:             $metrics['roas'],
-            hasAds:           $workspace->has_ads,
-            hasGsc:           $workspace->has_gsc,
-        );
-
-        return Inertia::render('Dashboard', [
-            'psi_metrics'                   => $psiMetrics,
-            'metrics'                       => $metrics,
-            'compare_metrics'               => $compareMetrics,
-            'gsc_metrics'                   => $gscMetrics,
-            'compare_gsc_metrics'           => $compareGscMetrics,
-            'advanced_paid_metrics'         => $advancedPaidMetrics,
-            'compare_advanced_paid_metrics' => $compareAdvancedPaidMetrics,
-            'targets'                       => $targets,
-            'utm_coverage'                  => $utmCoverage,
-            'not_tracked_banner_dismissed'  => $notTrackedBannerDismissed,
-            'chart_data'                    => $chartData,
-            'compare_chart_data'            => $compareChartData,
-            'top_alert'                     => $topAlert ? [
-                'type'       => $topAlert->type,
-                'severity'   => $topAlert->severity,
-                'created_at' => $topAlert->created_at->toDateTimeString(),
-            ] : null,
-            'days_of_data'                  => $daysOfData,
-            'raw_orders_count'              => $rawOrdersCount,
-            'ai_summary'                    => $aiSummary,
-            'has_null_fx'                   => $hasNullFx,
-            'granularity'                   => $granularity,
-            'store_ids'                     => $storeIds,
-            'notes'                         => $notes,
-            'holidays'                      => $holidays,
-            'workspace_events'              => $workspaceEvents,
-            // Phase 1.4 additions
-            'trend_dots'                    => $trendDots,
-            'daily_avg_delta'               => $dailyAvgDelta,
-            'recent_orders'                 => $recentOrders,
-            // Phase 3.1 — page narrative header
-            'narrative'                     => $pageNarrative,
-            // Phase 3.6 — Home rebuild
-            'attention_items'               => $attentionItems,
-            'contribution_margin'           => $cm,
-            'channel_rollup'                => $channelRollup,
-            'uptime_30d_pct'                => $uptime30dPct !== null ? (float) $uptime30dPct : null,
-            'same_weekday_metrics'          => $sameWeekdayMetrics,
-        ]);
-    }
-
-    /**
-     * Dismiss the "Not Tracked" iOS14 banner for the current user + workspace.
-     *
-     * Stores `not_tracked_banner_dismissed_{workspaceId} = true` in user's view_preferences JSONB.
-     * Why: banner fires once per workspace; this flag prevents it from reappearing on reload.
-     * See: PLANNING.md "Not Tracked" — negative sign / iOS14 banner trigger
-     */
-    public function dismissNotTrackedBanner(Request $request): \Illuminate\Http\JsonResponse
-    {
-        $workspaceId = app(WorkspaceContext::class)->id();
-        $user = $request->user();
-        $prefs = $user->view_preferences ?? [];
-        $prefs["not_tracked_banner_dismissed_{$workspaceId}"] = true;
-        $user->update(['view_preferences' => $prefs]);
-
-        return response()->json(['ok' => true]);
-    }
-
-    /**
-     * Parse a comma-separated store_ids string, verify all IDs belong to this workspace,
-     * and return a clean array of integers. Returns [] meaning "all stores".
-     *
-     * @return int[]
-     */
-    private function parseStoreIds(string $raw, int $workspaceId): array
-    {
-        if ($raw === '') {
-            return [];
-        }
-        $ids = array_values(array_filter(
-            array_map('intval', explode(',', $raw)),
-            fn (int $id) => $id > 0,
-        ));
-        if (empty($ids)) {
-            return [];
-        }
-        return Store::withoutGlobalScopes()
-            ->where('workspace_id', $workspaceId)
-            ->whereIn('id', $ids)
-            ->pluck('id')
-            ->map(fn ($id) => (int) $id)
-            ->all();
-    }
-
-    /**
-     * Aggregate snapshot + ad spend + attribution metrics for the given date range.
-     *
-     * Revenue and order totals come from daily_snapshots (pre-aggregated).
-     * Attribution uses orders.attribution_last_touch via RevenueAttributionService.
-     * Ad metrics are always workspace-level (no FK between stores and ad_accounts).
-     *
-     * Return shape covers all four channel rows:
-     *   Store:   revenue, orders, aov, new_customers
-     *   Paid:    ad_spend, roas, attributed_revenue (paid), cpo
-     *   Organic: not_tracked_revenue + not_tracked_pct (signed — can be negative for iOS14 inflation)
-     *   Derived: items_per_order, marketing_spend_pct
-     *
-     * @param int[] $storeIds Empty = all stores
-     */
-    private function computeMetrics(int $workspaceId, string $from, string $to, array $storeIds = []): array
-    {
-        $snapQuery = DailySnapshot::withoutGlobalScopes()
-            ->where('workspace_id', $workspaceId)
-            ->whereBetween('date', [$from, $to]);
-
-        if (! empty($storeIds)) {
-            $snapQuery->whereIn('store_id', $storeIds);
-        }
-
-        $snap = $snapQuery->selectRaw('
-                COALESCE(SUM(revenue), 0)      AS total_revenue,
-                COALESCE(SUM(orders_count), 0) AS total_orders,
-                COALESCE(SUM(items_sold), 0)   AS total_items
-            ')
-            ->first();
-
-        $revenue = (float) ($snap->total_revenue ?? 0);
-        $orders  = (int)   ($snap->total_orders  ?? 0);
-        $items   = (int)   ($snap->total_items   ?? 0);
-
-        // Campaign-level daily rows only — never mix levels; always workspace-wide.
-        // Why: ad_insights has campaign + ad levels; summing both would double-count.
-        $adSpendRow = AdInsight::withoutGlobalScopes()
-            ->where('workspace_id', $workspaceId)
-            ->where('level', 'campaign')
-            ->whereBetween('date', [$from, $to])
-            ->whereNull('hour')
-            ->selectRaw('SUM(spend_in_reporting_currency) AS spend_reporting, SUM(spend) AS spend_native')
-            ->first();
-
-        $adSpendReporting = (float) ($adSpendRow->spend_reporting ?? 0);
-        // Marketing % uses native spend per PLANNING.md §Formulas.
-        $adSpendNative    = (float) ($adSpendRow->spend_native    ?? 0);
-
-        // UTM-attributed revenue — total_tagged covers all paid + other sources.
-        $fromCarbon = Carbon::parse($from)->startOfDay();
-        $toCarbon   = Carbon::parse($to)->endOfDay();
-        $storeIdForAttribution = count($storeIds) === 1 ? $storeIds[0] : null;
-        $attributed = $this->attribution->getAttributedRevenue(
-            $workspaceId,
-            $fromCarbon,
-            $toCarbon,
-            $storeIdForAttribution,
-        );
-
-        $paidAttributedRevenue = $attributed['facebook'] + $attributed['google'];
-        $unattributed          = $this->attribution->getUnattributedRevenue(
-            $revenue,
-            $attributed['total_tagged'],
-        );
-
-        // New customers: buyers who had no orders before this period.
-        // Uses a NOT EXISTS subquery to identify first-time buyers.
-        $newCustomers = (int) DB::selectOne("
-            SELECT COUNT(DISTINCT o.customer_id) AS cnt
-            FROM orders o
-            WHERE o.workspace_id = ?
-              AND o.status IN ('completed', 'processing')
-              AND o.customer_id IS NOT NULL
-              AND o.occurred_at BETWEEN ? AND ?
-              AND NOT EXISTS (
-                  SELECT 1 FROM orders prev
-                  WHERE prev.workspace_id = o.workspace_id
-                    AND prev.customer_id  = o.customer_id
-                    AND prev.occurred_at  < ?
-                    AND prev.customer_id IS NOT NULL
-              )
-        ", [
-            $workspaceId,
-            $from . ' 00:00:00',
-            $to   . ' 23:59:59',
-            $from . ' 00:00:00',
-        ])?->cnt ?? 0;
-
-        // Not Tracked % — signed (can be negative when platforms over-report).
-        // Why: negative value indicates iOS14 attribution inflation.
-        // See: PLANNING.md "Not Tracked" — sign-aware display logic
-        $notTrackedPct = $revenue > 0
-            ? round(($unattributed / $revenue) * 100, 1)
-            : null;
-
-        return [
-            // Store row
-            'revenue'              => $revenue,
-            'orders'               => $orders,
-            'aov'                  => $orders > 0 ? round($revenue / $orders, 2) : null,
-            'new_customers'        => $newCustomers,
-            // Paid row
-            'ad_spend'             => $adSpendReporting > 0 ? $adSpendReporting : null,
-            'roas'                 => ($adSpendReporting > 0 && $revenue > 0)
-                ? round($revenue / $adSpendReporting, 2)
-                : null,
-            'attributed_revenue'   => $paidAttributedRevenue > 0 ? round($paidAttributedRevenue, 2) : null,
-            'cpo'                  => ($adSpendReporting > 0 && $orders > 0)
-                ? round($adSpendReporting / $orders, 2)
-                : null,
-            // Organic / Not Tracked row
-            'not_tracked_revenue'  => round($unattributed, 2), // signed — can be negative
-            'not_tracked_pct'      => $notTrackedPct,          // signed — can be negative
-            // Additional derived metrics
-            'items_per_order'      => $orders > 0 ? round($items / $orders, 2) : null,
-            'marketing_spend_pct'  => ($revenue > 0 && $adSpendNative > 0)
-                ? round(($adSpendNative / $revenue) * 100, 1)
-                : null,
-        ];
-    }
-
-    /**
-     * Compute advanced paid metrics for the "Show advanced metrics" toggle.
-     *
-     * CPM / CPC / platform conversion rate are computed on the fly — never stored.
-     * Uses campaign-level rows only (no ad-level rows — see ad_insights level check).
-     * Platform conversion rate = platform_conversions / clicks (null when clicks=0).
-     *
-     * Related: resources/js/Pages/Dashboard.tsx (advanced metrics toggle in Paid Ads row)
-     * See: PLANNING.md "Show advanced metrics toggle"
-     *
-     * @return array{cpm:float|null,cpc:float|null,platform_conversion_rate:float|null,platform_conversions:int,impressions:int,clicks:int}
-     */
-    private function computeAdvancedPaidMetrics(int $workspaceId, string $from, string $to): array
-    {
-        $row = AdInsight::withoutGlobalScopes()
-            ->where('workspace_id', $workspaceId)
-            ->where('level', 'campaign')
-            ->whereBetween('date', [$from, $to])
-            ->whereNull('hour')
-            ->selectRaw('
-                COALESCE(SUM(impressions), 0)          AS total_impressions,
-                COALESCE(SUM(clicks), 0)               AS total_clicks,
-                COALESCE(SUM(spend_in_reporting_currency), 0) AS total_spend,
-                COALESCE(SUM(platform_conversions), 0) AS total_conversions
-            ')
-            ->first();
-
-        $impressions   = (int)   ($row->total_impressions  ?? 0);
-        $clicks        = (int)   ($row->total_clicks       ?? 0);
-        $spend         = (float) ($row->total_spend        ?? 0);
-        $conversions   = (int)   ($row->total_conversions  ?? 0);
-
-        return [
-            'impressions'               => $impressions,
-            'clicks'                    => $clicks,
-            'platform_conversions'      => $conversions,
-            // CPM = spend / impressions * 1000. NULLIF prevents divide-by-zero.
-            'cpm'                       => $impressions > 0 ? round(($spend / $impressions) * 1000, 2) : null,
-            // CPC = spend / clicks.
-            'cpc'                       => $clicks > 0 ? round($spend / $clicks, 2) : null,
-            // Platform conversion rate = platform_conversions / clicks (as %).
-            'platform_conversion_rate'  => $clicks > 0 ? round(($conversions / $clicks) * 100, 2) : null,
-        ];
-    }
-
-    /**
-     * Aggregate GSC metrics for the organic section.
-     *
-     * Uses only aggregate rows (device='all', country='ZZ') to avoid double-counting
-     * breakdown rows. Weighted average position: SUM(position * impressions) / SUM(impressions).
-     *
-     * Sums across all GSC properties in the workspace (multi-property workspaces show combined).
-     */
-    private function computeGscMetrics(int $workspaceId, string $from, string $to): array
-    {
-        $row = GscDailyStat::withoutGlobalScopes()
-            ->where('workspace_id', $workspaceId)
-            ->whereBetween('date', [$from, $to])
-            ->where('device', 'all')
-            ->where('country', 'ZZ')
-            ->selectRaw('
-                COALESCE(SUM(clicks), 0)      AS total_clicks,
-                COALESCE(SUM(impressions), 0) AS total_impressions,
-                CASE WHEN COALESCE(SUM(impressions), 0) > 0
-                     THEN SUM(position * impressions) / SUM(impressions)
-                     ELSE NULL END AS avg_position
-            ')
-            ->first();
-
-        return [
-            'gsc_clicks'      => (int)   ($row->total_clicks      ?? 0),
-            'gsc_impressions' => (int)   ($row->total_impressions  ?? 0),
-            'avg_position'    => $row->avg_position !== null
-                ? round((float) $row->avg_position, 1)
-                : null,
-        ];
-    }
-
-    /**
-     * Build multi-series time-series chart data.
-     *
-     * Each point: {date, revenue, orders, aov, roas, ad_spend, gsc_clicks}
-     * hourly  → hourly_snapshots (revenue + orders only; no ad or GSC data at hourly grain)
-     * weekly  → daily_snapshots grouped by week + ad_insights + gsc_daily_stats
-     * daily   → daily_snapshots per day + ad_insights + gsc_daily_stats
-     *
-     * Ad metrics: always workspace-level.
-     * GSC clicks: sum across all properties, aggregate rows only (device='all', country='ZZ').
-     * Revenue/orders: filtered by store selection.
-     *
-     * @param int[] $storeIds Empty = all stores
-     * @return array<int, array{date:string,revenue:float,orders:int,aov:float|null,roas:float|null,ad_spend:float|null,gsc_clicks:int|null}>
-     */
-    private function buildChartData(
-        int $workspaceId,
-        string $from,
-        string $to,
-        string $granularity,
-        array $storeIds = [],
-    ): array {
-        $storeFilter = ! empty($storeIds)
-            ? 'AND s.store_id IN (' . implode(',', array_map('intval', $storeIds)) . ')'
-            : '';
-
-        if ($granularity === 'hourly') {
-            // No ad or GSC data at hourly granularity — both are daily only.
-            $q = HourlySnapshot::withoutGlobalScopes()
-                ->where('workspace_id', $workspaceId)
-                ->whereBetween('date', [$from, $to]);
-            if (! empty($storeIds)) {
-                $q->whereIn('store_id', $storeIds);
+            $primaryDays = $pf->diffInDays($pt) + 1;
+            // YoY: compare start is exactly one year before primary start
+            if ($cf->year === $pf->year - 1 && $cf->month === $pf->month && $cf->day === $pf->day) {
+                $comparisonLabel = 'vs prior year';
+            } elseif ($cf->diffInDays($pf) === $primaryDays) {
+                $comparisonLabel = 'vs prior period';
+            } else {
+                $comparisonLabel = 'vs ' . Carbon::parse($cmpFrom)->format('M j') . '–' . Carbon::parse($cmpTo)->format('M j');
             }
-            return $q->selectRaw("
-                    (date::text || 'T' || LPAD(hour::text, 2, '0') || ':00:00') AS date,
-                    COALESCE(SUM(revenue), 0)      AS revenue,
-                    COALESCE(SUM(orders_count), 0) AS orders,
-                    CASE WHEN SUM(orders_count) > 0
-                         THEN SUM(revenue) / SUM(orders_count) ELSE NULL END AS aov,
-                    NULL::numeric AS ad_spend,
-                    NULL::numeric AS roas,
-                    NULL::integer AS gsc_clicks
-                ")
-                ->groupByRaw('date, hour')
-                ->orderByRaw('date, hour')
-                ->get()
-                ->map(fn ($r) => $this->mapChartRow($r))
-                ->all();
         }
 
-        if ($granularity === 'weekly') {
-            // Why: daily_snapshots has one row per (store_id, date). Joining a daily-level
-            // ad_insights subquery and then using SUM(ai.ad_spend) in the outer weekly GROUP BY
-            // would multiply ad_spend by the number of stores (one ai row fans out to N store rows).
-            // Fix: aggregate both subqueries to weekly level so they produce one row per week,
-            // then include them in GROUP BY (same pattern as the daily query uses ai.ad_spend
-            // in GROUP BY to avoid double-counting across store rows).
-            $rows = DB::select("
-                SELECT
-                    DATE_TRUNC('week', s.date)::date::text AS date,
-                    COALESCE(SUM(s.revenue), 0)            AS revenue,
-                    COALESCE(SUM(s.orders_count), 0)       AS orders,
-                    CASE WHEN SUM(s.orders_count) > 0
-                         THEN SUM(s.revenue) / SUM(s.orders_count) ELSE NULL END AS aov,
-                    COALESCE(ai.ad_spend, 0)               AS ad_spend,
-                    CASE WHEN COALESCE(ai.ad_spend, 0) > 0
-                         THEN SUM(s.revenue) / ai.ad_spend ELSE NULL END AS roas,
-                    COALESCE(gsc.gsc_clicks, 0)            AS gsc_clicks
-                FROM daily_snapshots s
-                LEFT JOIN (
-                    SELECT DATE_TRUNC('week', date)::date AS week,
-                           SUM(spend_in_reporting_currency) AS ad_spend
-                    FROM ad_insights
-                    WHERE workspace_id = ? AND level = 'campaign' AND hour IS NULL
-                    GROUP BY DATE_TRUNC('week', date)
-                ) ai ON ai.week = DATE_TRUNC('week', s.date)::date
-                LEFT JOIN (
-                    SELECT DATE_TRUNC('week', date)::date AS week,
-                           SUM(clicks) AS gsc_clicks
-                    FROM gsc_daily_stats
-                    WHERE workspace_id = ? AND device = 'all' AND country = 'ZZ'
-                    GROUP BY DATE_TRUNC('week', date)
-                ) gsc ON gsc.week = DATE_TRUNC('week', s.date)::date
-                WHERE s.workspace_id = ?
-                  AND s.date BETWEEN ? AND ?
-                  {$storeFilter}
-                GROUP BY DATE_TRUNC('week', s.date), ai.ad_spend, gsc.gsc_clicks
-                ORDER BY DATE_TRUNC('week', s.date)
-            ", [$workspaceId, $workspaceId, $workspaceId, $from, $to]);
-
-            return array_map(fn ($r) => $this->mapChartRow($r), $rows);
-        }
-
-        // daily (default)
-        $rows = DB::select("
-            SELECT
-                s.date::text AS date,
-                COALESCE(SUM(s.revenue), 0)      AS revenue,
-                COALESCE(SUM(s.orders_count), 0) AS orders,
-                CASE WHEN SUM(s.orders_count) > 0
-                     THEN SUM(s.revenue) / SUM(s.orders_count) ELSE NULL END AS aov,
-                COALESCE(ai.ad_spend, 0)         AS ad_spend,
-                CASE WHEN COALESCE(ai.ad_spend, 0) > 0
-                     THEN SUM(s.revenue) / ai.ad_spend ELSE NULL END AS roas,
-                COALESCE(gsc.gsc_clicks, 0)      AS gsc_clicks
-            FROM daily_snapshots s
-            LEFT JOIN (
-                SELECT date, SUM(spend_in_reporting_currency) AS ad_spend
-                FROM ad_insights
-                WHERE workspace_id = ? AND level = 'campaign' AND hour IS NULL
-                GROUP BY date
-            ) ai ON ai.date = s.date
-            LEFT JOIN (
-                SELECT date, SUM(clicks) AS gsc_clicks
-                FROM gsc_daily_stats
-                WHERE workspace_id = ? AND device = 'all' AND country = 'ZZ'
-                GROUP BY date
-            ) gsc ON gsc.date = s.date
-            WHERE s.workspace_id = ?
-              AND s.date BETWEEN ? AND ?
-              {$storeFilter}
-            GROUP BY s.date, ai.ad_spend, gsc.gsc_clicks
-            ORDER BY s.date
-        ", [$workspaceId, $workspaceId, $workspaceId, $from, $to]);
-
-        return array_map(fn ($r) => $this->mapChartRow($r), $rows);
-    }
-
-    /** @param object $r */
-    private function mapChartRow(object $r): array
-    {
-        $adSpend   = $r->ad_spend   !== null ? (float) $r->ad_spend   : null;
-        $gscClicks = $r->gsc_clicks !== null ? (int)   $r->gsc_clicks : null;
-
-        return [
-            'date'       => $r->date,
-            'revenue'    => (float) $r->revenue,
-            'orders'     => (int)   $r->orders,
-            'aov'        => $r->aov  !== null ? round((float) $r->aov,  2) : null,
-            'roas'       => $r->roas !== null ? round((float) $r->roas, 2) : null,
-            'ad_spend'   => ($adSpend !== null && $adSpend > 0) ? round($adSpend, 2) : null,
-            'gsc_clicks' => ($gscClicks !== null && $gscClicks > 0) ? $gscClicks : null,
-        ];
-    }
-
-    /**
-     * Return the latest mobile Lighthouse scores for the workspace.
-     *
-     * Picks the most recently checked active URL (preferring homepage) and returns
-     * its latest mobile snapshot. Used to populate the "Site Performance" channel row
-     * on the dashboard.
-     *
-     * @return array{performance_score:int|null,lcp_ms:int|null,cls_score:float|null,checked_at:string|null}|null
-     */
-    private function computePsiMetrics(int $workspaceId): ?array
-    {
-        // Find the homepage URL or fall back to most recently checked URL.
-        $urlId = StoreUrl::withoutGlobalScopes()
-            ->where('workspace_id', $workspaceId)
-            ->where('is_active', true)
-            ->orderByDesc('is_homepage')
-            ->value('id');
-
-        if ($urlId === null) {
-            return null;
-        }
-
-        $snap = LighthouseSnapshot::withoutGlobalScopes()
-            ->where('workspace_id', $workspaceId)
-            ->where('store_url_id', $urlId)
-            ->where('strategy', 'mobile')
-            ->orderByDesc('checked_at')
-            ->select(['performance_score', 'lcp_ms', 'cls_score', 'checked_at'])
-            ->first();
-
-        if ($snap === null) {
-            return null;
-        }
-
-        return [
-            'performance_score' => $snap->performance_score,
-            'lcp_ms'            => $snap->lcp_ms,
-            'cls_score'         => $snap->cls_score ? (float) $snap->cls_score : null,
-            'checked_at'        => $snap->checked_at?->toISOString(),
-        ];
-    }
-
-    /**
-     * Compute 14-day binary target-relative dot strips for the Real row MetricCards.
-     *
-     * For each metric (revenue_vs_aov, roas, cpo, marketing_pct), returns an array of
-     * 14 booleans (index 0 = 14 days ago, index 13 = yesterday) indicating whether
-     * that day "hit" its target. null = no data for that day.
-     *
-     * Only computed when workspace targets exist; returns empty arrays otherwise.
-     * Phase 1.4: binary hit/miss. Phase 2+: graded (near-miss threshold).
-     *
-     * See: PLANNING.md "14-day trend dot strip"
-     * Related: resources/js/Pages/Dashboard.tsx (trendDots prop on MetricCards)
-     *
-     * @param array{roas:float|null,cpo:float|null,marketing_pct:float|null} $targets
-     * @param int[] $storeIds
-     * @return array{roas:array<bool|null>,cpo:array<bool|null>,marketing_pct:array<bool|null>}
-     */
-    private function computeTrendDots(int $workspaceId, array $targets, array $storeIds = []): array
-    {
-        $to      = now()->subDay()->toDateString();
-        $from    = now()->subDays(14)->toDateString();
-        $dates   = [];
-        $current = Carbon::parse($from);
-        while ($current->lte(Carbon::parse($to))) {
-            $dates[] = $current->toDateString();
-            $current->addDay();
-        }
-
-        $storeFilter = ! empty($storeIds)
-            ? 'AND s.store_id IN (' . implode(',', array_map('intval', $storeIds)) . ')'
-            : '';
-
-        $rows = DB::select("
-            SELECT
-                s.date::text AS date,
-                COALESCE(SUM(s.revenue), 0)      AS revenue,
-                COALESCE(SUM(s.orders_count), 0) AS orders,
-                COALESCE(ai.ad_spend, 0)         AS ad_spend
-            FROM daily_snapshots s
-            LEFT JOIN (
-                SELECT date, SUM(spend_in_reporting_currency) AS ad_spend
-                FROM ad_insights
-                WHERE workspace_id = ? AND level = 'campaign' AND hour IS NULL
-                GROUP BY date
-            ) ai ON ai.date = s.date
-            WHERE s.workspace_id = ?
-              AND s.date BETWEEN ? AND ?
-              {$storeFilter}
-            GROUP BY s.date, ai.ad_spend
-            ORDER BY s.date
-        ", [$workspaceId, $workspaceId, $from, $to]);
-
-        // Index by date for O(1) lookup
-        $byDate = [];
-        foreach ($rows as $r) {
-            $byDate[$r->date] = [
-                'revenue'  => (float) $r->revenue,
-                'orders'   => (int)   $r->orders,
-                'ad_spend' => (float) $r->ad_spend,
+        // ── Trend chart: 14 daily points (Real vs Store vs Platforms blended)
+        $trend = [];
+        for ($i = 13; $i >= 0; $i--) {
+            $date = $now->copy()->subDays($i)->format('Y-m-d');
+            $base = 15000 + rand(-2000, 4000);
+            $trend[] = [
+                'date'      => $date,
+                'real'      => $base,
+                'store'     => (int) ($base * 0.95),
+                'facebook'  => (int) ($base * 1.18),
+                'google'    => (int) ($base * 0.72),
             ];
         }
 
-        $roasDots    = [];
-        $cpoDots     = [];
-        $mktPctDots  = [];
-
-        foreach ($dates as $date) {
-            $d = $byDate[$date] ?? null;
-
-            // ROAS dot: revenue / ad_spend >= target_roas
-            if ($targets['roas'] !== null && $d !== null && $d['ad_spend'] > 0) {
-                $roasDots[] = ($d['revenue'] / $d['ad_spend']) >= $targets['roas'];
-            } else {
-                $roasDots[] = null;
-            }
-
-            // CPO dot: ad_spend / orders <= target_cpo (lower is better)
-            if ($targets['cpo'] !== null && $d !== null && $d['orders'] > 0 && $d['ad_spend'] > 0) {
-                $cpoDots[] = ($d['ad_spend'] / $d['orders']) <= $targets['cpo'];
-            } else {
-                $cpoDots[] = null;
-            }
-
-            // Marketing % dot: ad_spend / revenue * 100 <= target_marketing_pct (lower is better)
-            if ($targets['marketing_pct'] !== null && $d !== null && $d['revenue'] > 0) {
-                $mktPctDots[] = (($d['ad_spend'] / $d['revenue']) * 100) <= $targets['marketing_pct'];
-            } else {
-                $mktPctDots[] = null;
-            }
-        }
-
-        return [
-            'roas'           => $roasDots,
-            'cpo'            => $cpoDots,
-            'marketing_pct'  => $mktPctDots,
-        ];
-    }
-
-    /**
-     * Compute the "Last 7 days vs prior 7 days" daily average delta widget data.
-     *
-     * Returns avg daily revenue and orders for the last 7 days and the prior 7 days,
-     * plus the percentage change between them.
-     *
-     * Why: shows momentum ("is the last week trending up or down vs the week before?")
-     * at a glance without the noise of the full date-range comparison.
-     * See: PLANNING.md "Daily average delta block" (Phase 1.4 widget)
-     *
-     * @param int[] $storeIds
-     * @return array{last7_avg_revenue:float|null,prev7_avg_revenue:float|null,revenue_delta_pct:float|null,last7_avg_orders:float|null,prev7_avg_orders:float|null,orders_delta_pct:float|null}
-     */
-    private function computeDailyAvgDelta(int $workspaceId, array $storeIds = []): array
-    {
-        $last7To   = now()->subDay()->toDateString();
-        $last7From = now()->subDays(7)->toDateString();
-        $prev7To   = now()->subDays(8)->toDateString();
-        $prev7From = now()->subDays(14)->toDateString();
-
-        $query = DailySnapshot::withoutGlobalScopes()
-            ->where('workspace_id', $workspaceId);
-
-        if (! empty($storeIds)) {
-            $query->whereIn('store_id', $storeIds);
-        }
-
-        $last7 = (clone $query)
-            ->whereBetween('date', [$last7From, $last7To])
-            ->selectRaw('COALESCE(SUM(revenue),0)/7.0 AS avg_revenue, COALESCE(SUM(orders_count),0)/7.0 AS avg_orders')
-            ->first();
-
-        $prev7 = (clone $query)
-            ->whereBetween('date', [$prev7From, $prev7To])
-            ->selectRaw('COALESCE(SUM(revenue),0)/7.0 AS avg_revenue, COALESCE(SUM(orders_count),0)/7.0 AS avg_orders')
-            ->first();
-
-        $last7Rev  = $last7 ? (float) $last7->avg_revenue  : null;
-        $prev7Rev  = $prev7 ? (float) $prev7->avg_revenue  : null;
-        $last7Ord  = $last7 ? (float) $last7->avg_orders   : null;
-        $prev7Ord  = $prev7 ? (float) $prev7->avg_orders   : null;
-
-        return [
-            'last7_avg_revenue'   => $last7Rev > 0 ? round($last7Rev, 2) : null,
-            'prev7_avg_revenue'   => $prev7Rev > 0 ? round($prev7Rev, 2) : null,
-            'revenue_delta_pct'   => ($last7Rev !== null && $prev7Rev > 0)
-                ? round((($last7Rev - $prev7Rev) / $prev7Rev) * 100, 1)
-                : null,
-            'last7_avg_orders'    => $last7Ord > 0 ? round($last7Ord, 1) : null,
-            'prev7_avg_orders'    => $prev7Ord > 0 ? round($prev7Ord, 1) : null,
-            'orders_delta_pct'    => ($last7Ord !== null && $prev7Ord > 0)
-                ? round((($last7Ord - $prev7Ord) / $prev7Ord) * 100, 1)
-                : null,
-        ];
-    }
-
-    /**
-     * Fetch the latest orders for the "Latest orders feed" widget.
-     *
-     * Only shown when at least one connected store has active webhooks — polling stores
-     * show a "Enable webhooks for live orders" nudge instead.
-     * Returns null when no stores are connected.
-     *
-     * Why: webhook-gated to avoid showing stale data as "live." Honest labeling is the
-     * trust mechanism. See: PLANNING.md "Latest orders feed" (Phase 1.4 widget)
-     *
-     * @param int[] $storeIds
-     * @return array{orders:list<array{id:int,order_number:string|null,status:string,total:float,currency:string,occurred_at:string}>,feed_source:'webhook'|'polling'|null,last_synced_at:string|null}|null
-     */
-    private function computeRecentOrders(int $workspaceId, array $storeIds = []): ?array
-    {
-        // Find stores and their webhook status
-        $storeQuery = Store::withoutGlobalScopes()
-            ->where('workspace_id', $workspaceId)
-            ->where('status', 'active');
-
-        if (! empty($storeIds)) {
-            $storeQuery->whereIn('id', $storeIds);
-        }
-
-        $stores = $storeQuery->select(['id', 'last_synced_at'])->get();
-
-        if ($stores->isEmpty()) {
-            return null;
-        }
-
-        // Check if any active store has registered webhooks
-        // Why: we only show "Live via webhook" when webhooks are confirmed active.
-        $hasWebhooks = \App\Models\StoreWebhook::withoutGlobalScopes()
-            ->whereIn('store_id', $stores->pluck('id'))
-            ->whereNull('deleted_at')
-            ->exists();
-
-        $feedSource = $hasWebhooks ? 'webhook' : 'polling';
-
-        $lastSyncedAt = $stores->max('last_synced_at');
-
-        $orderQuery = Order::withoutGlobalScopes()
-            ->where('workspace_id', $workspaceId)
-            ->whereIn('status', ['completed', 'processing'])
-            ->orderByDesc('occurred_at');
-
-        if (! empty($storeIds)) {
-            $orderQuery->whereIn('store_id', $storeIds);
-        }
-
-        $orders = $orderQuery
-            ->select(['id', 'external_number', 'status', 'total_in_reporting_currency', 'total', 'currency', 'occurred_at'])
-            ->limit(10)
-            ->get()
-            ->map(fn ($o) => [
-                'id'           => $o->id,
-                'order_number' => $o->external_number,
-                'status'       => $o->status,
-                'total'        => $o->total_in_reporting_currency !== null
-                    ? (float) $o->total_in_reporting_currency
-                    : (float) $o->total,
-                'currency'     => $o->currency,
-                'occurred_at'  => $o->occurred_at->toISOString(),
-            ])
-            ->all();
-
-        return [
-            'orders'         => $orders,
-            'feed_source'    => $feedSource,
-            'last_synced_at' => $lastSyncedAt?->toISOString(),
-        ];
-    }
-
-    /**
-     * Build the "Today's Attention" list for the Home page.
-     *
-     * Merges unresolved alerts (severity != info) with open recommendations sorted by
-     * priority, capped at 5 total items. Alerts take precedence over recommendations.
-     *
-     * Reads from: alerts, recommendations
-     * @return array<int, array{text:string, href:string, severity:string}>
-     */
-    private function computeTodaysAttention(int $workspaceId): array
-    {
-        $items = [];
-
-        // Unresolved non-info alerts first.
-        $alerts = Alert::withoutGlobalScopes()
-            ->where('workspace_id', $workspaceId)
-            ->whereNull('resolved_at')
-            ->where('is_silent', false)
-            ->whereNotIn('severity', ['info'])
-            ->select(['type', 'severity', 'created_at'])
-            ->orderByRaw("CASE severity WHEN 'critical' THEN 1 WHEN 'warning' THEN 2 ELSE 3 END")
-            ->orderByDesc('created_at')
-            ->limit(5)
-            ->get();
-
-        foreach ($alerts as $alert) {
-            $items[] = [
-                'text'     => ucfirst(str_replace('_', ' ', $alert->type)),
-                'href'     => '/manage/integrations',
-                'severity' => $alert->severity === 'critical' ? 'critical' : 'warning',
-            ];
-        }
-
-        // Fill remaining slots with open recommendations (sorted by priority ASC = higher priority first).
-        $remaining = 5 - count($items);
-        if ($remaining > 0) {
-            $recs = DB::table('recommendations')
-                ->where('workspace_id', $workspaceId)
-                ->where('status', 'open')
-                ->where(function ($q) {
-                    $q->whereNull('snoozed_until')
-                      ->orWhere('snoozed_until', '<', now());
-                })
-                ->orderBy('priority')
-                ->orderByDesc('created_at')
-                ->limit($remaining)
-                ->get(['title', 'body', 'target_url', 'priority']);
-
-            foreach ($recs as $rec) {
-                $items[] = [
-                    'text'     => $rec->title,
-                    'href'     => $rec->target_url ?? '/acquisition',
-                    'severity' => 'info',
+        // ── Comparison trend: prior 14 days aligned by index (index 0 = 14 days before primary start)
+        // Revenue comparison values ~13% lower to reflect the mock "prior period" baseline.
+        $comparisonTrend = null;
+        if ($hasComparison) {
+            $comparisonTrend = [];
+            for ($i = 13; $i >= 0; $i--) {
+                $date = $now->copy()->subDays($i + 14)->format('Y-m-d');
+                $base = 13000 + rand(-1500, 3000);  // prior period is ~13% lower on average
+                $comparisonTrend[] = [
+                    'date' => $date,
+                    'real' => $base,
                 ];
             }
         }
 
-        return array_slice($items, 0, 5);
-    }
-
-    /**
-     * Compute Contribution Margin for the Home hero card (§F3).
-     *
-     * CM = Revenue − COGS − Fees − Ad Spend
-     * Returns null CM + cogs_configured=false when >50% of order_items have NULL unit_cost.
-     *
-     * @param int[] $storeIds
-     * @return array{cm:float|null, cogs_configured:bool}
-     */
-    private function computeContributionMargin(
-        int $workspaceId,
-        string $from,
-        string $to,
-        array $storeIds,
-        float $adSpend,
-        \App\ValueObjects\StoreCostSettings $costSettings,
-    ): array {
-        $orderQuery = DB::table('orders')
-            ->where('orders.workspace_id', $workspaceId)
-            ->whereIn('orders.status', ['completed', 'processing'])
-            ->whereBetween('orders.occurred_at', [$from . ' 00:00:00', $to . ' 23:59:59']);
-
-        if (! empty($storeIds)) {
-            $orderQuery->whereIn('orders.store_id', $storeIds);
-        }
-
-        // Check COGS availability: >50% NULL → not configured.
-        $cogsStats = (clone $orderQuery)
-            ->join('order_items', 'order_items.order_id', '=', 'orders.id')
-            ->selectRaw('
-                COUNT(*) AS total_items,
-                COUNT(order_items.unit_cost) AS items_with_cost
-            ')
-            ->first();
-
-        $totalItems    = (int) ($cogsStats->total_items    ?? 0);
-        $itemsWithCost = (int) ($cogsStats->items_with_cost ?? 0);
-        $cogsConfigured = $totalItems === 0 || ($itemsWithCost / $totalItems) > 0.5;
-
-        if (! $cogsConfigured) {
-            return ['cm' => null, 'cogs_configured' => false];
-        }
-
-        // COGS + fees + tax + refund aggregation.
-        $agg = (clone $orderQuery)
-            ->leftJoin('order_items', 'order_items.order_id', '=', 'orders.id')
-            ->selectRaw('
-                COALESCE(SUM(order_items.unit_cost * order_items.quantity), 0)                                              AS cogs,
-                COALESCE(SUM(orders.payment_fee), 0)                                                                        AS payment_fees,
-                COALESCE(SUM(orders.shipping), 0)                                                                           AS shipping_fees,
-                COALESCE(SUM(orders.total_in_reporting_currency), SUM(orders.total), 0)                                     AS revenue,
-                COALESCE(SUM(orders.tax), 0)                                                                                AS total_tax,
-                COALESCE(SUM(orders.refund_amount), 0)                                                                      AS total_refunds,
-                COALESCE(SUM(CASE WHEN orders.tax = 0 THEN COALESCE(orders.total_in_reporting_currency, orders.total) ELSE 0 END), 0) AS revenue_no_tax,
-                COUNT(DISTINCT orders.id)                                                                                   AS order_count
-            ')
-            ->first();
-
-        $cogs    = (float) ($agg->cogs         ?? 0);
-        $revenue = (float) ($agg->revenue      ?? 0);
-
-        $profitAdj = ProfitCalculator::compute(
-            revenue:       $revenue,
-            totalTax:      (float) ($agg->total_tax      ?? 0),
-            revenueNoTax:  (float) ($agg->revenue_no_tax ?? 0),
-            totalRefunds:  (float) ($agg->total_refunds  ?? 0),
-            totalShipping: (float) ($agg->shipping_fees  ?? 0),
-            orderCount:    (int)   ($agg->order_count    ?? 0),
-            settings:      $costSettings,
-        );
-
-        $fees = (float) ($agg->payment_fees ?? 0) + $profitAdj['effective_shipping'];
-        $cm   = $profitAdj['net_revenue'] - $cogs - $fees - $adSpend;
-
-        $fixedCosts = $costSettings->proratedFixedCosts($from, $to);
-
-        return [
-            'cm'           => round($cm - $fixedCosts, 2),
-            'fixed_costs'  => $fixedCosts > 0 ? round($fixedCosts, 2) : null,
-            'cogs_configured' => true,
-        ];
-    }
-
-    /**
-     * Compute the 5-row §M1 channel roll-up for the Home page.
-     *
-     * Groups orders by attribution_last_touch channel_type and maps to the
-     * 5-row rollup: Paid Search / Paid Social / Organic / Email / Direct.
-     * Ad spend attached only to Paid Search + Paid Social rows (§F4).
-     *
-     * @see PROGRESS.md §M1 — channel_type → 5-row rollup
-     * @return array<int, array{channel:string, revenue:float, spend:float|null, roas:float|null}>
-     */
-    private function computeChannelRollup(
-        int $workspaceId,
-        string $from,
-        string $to,
-        float $totalAdSpend,
-    ): array {
-        // §M1 mapping
-        $channelMap = [
-            'paid_search'    => 'Paid Search',
-            'paid_social'    => 'Paid Social',
-            'organic_search' => 'Organic',
-            'organic_social' => 'Organic',
-            'email'          => 'Email',
-            'sms'            => 'Email',
-            'direct'         => 'Direct',
-            'referral'       => 'Direct',
-            'affiliate'      => 'Paid Social',
-            'other'          => 'Direct',
-        ];
-
-        $rows = DB::table('orders')
-            ->where('workspace_id', $workspaceId)
-            ->whereIn('status', ['completed', 'processing'])
-            ->whereBetween('occurred_at', [$from . ' 00:00:00', $to . ' 23:59:59'])
-            ->whereNotNull('attribution_last_touch')
-            ->selectRaw("
-                attribution_last_touch->>'channel_type' AS channel_type,
-                COALESCE(SUM(total_in_reporting_currency), SUM(total), 0) AS revenue
-            ")
-            ->groupByRaw("attribution_last_touch->>'channel_type'")
-            ->get();
-
-        // Aggregate by rollup label.
-        $rollup = [
-            'Paid Search'  => 0.0,
-            'Paid Social'  => 0.0,
-            'Organic'      => 0.0,
-            'Email'        => 0.0,
-            'Direct'       => 0.0,
-        ];
-
-        foreach ($rows as $row) {
-            $label = $channelMap[$row->channel_type] ?? 'Direct';
-            $rollup[$label] += (float) $row->revenue;
-        }
-
-        // Ad spend split: Paid Search and Paid Social get proportional share.
-        $paidRevenue   = $rollup['Paid Search'] + $rollup['Paid Social'];
-        $result = [];
-        foreach ($rollup as $channel => $revenue) {
-            $spend = null;
-            $roas  = null;
-            if ($totalAdSpend > 0 && in_array($channel, ['Paid Search', 'Paid Social'], true)) {
-                // Distribute total ad spend proportionally by attributed revenue.
-                $spend = $paidRevenue > 0
-                    ? round($totalAdSpend * ($revenue / $paidRevenue), 2)
-                    : round($totalAdSpend / 2, 2);
-                $roas  = $spend > 0 ? round($revenue / $spend, 2) : null;
-            }
-
-            $result[] = [
-                'channel' => $channel,
-                'revenue' => round($revenue, 2),
-                'spend'   => $spend,
-                'roas'    => $roas,
+        // ── Today hourly data (0 – current hour)
+        $currentHour = (int) $now->format('G');
+        $hourly = [];
+        for ($h = 0; $h <= $currentHour; $h++) {
+            $hourly[] = [
+                'hour'    => $h,
+                'revenue' => rand(400, 2800),
             ];
         }
+        $todayRevenue = array_sum(array_column($hourly, 'revenue'));
 
-        return $result;
+        // ── Comparison sparklines for KPI cards (prior-period mock values ~13% lower)
+        // Populated only when comparison mode is active. Aligned index-for-index with primary sparklines.
+        $cmpSparklines = $hasComparison ? [
+            'revenue' => array_map(fn($v) => ['value' => $v], [88000, 94500, 99800, 103000, 105800, 107000, 108210]),
+            'profit'  => array_map(fn($v) => ['value' => $v], [27000, 29000, 31000, 32000, 32800, 33400, 33600]),
+            'orders'  => array_map(fn($v) => ['value' => $v], [820, 890, 960, 1020, 1060, 1080, 1096]),
+            'aov'     => array_map(fn($v) => ['value' => $v], [88, 90, 91, 92, 93, 94, 95]),
+            'roas'    => array_map(fn($v) => ['value' => $v], [4.2, 4.1, 4.05, 4.0, 3.97, 3.95, 3.92]),
+            'mer'     => array_map(fn($v) => ['value' => $v], [4.5, 4.35, 4.2, 4.1, 4.05, 4.0, 3.97]),
+            'cac'     => array_map(fn($v) => ['value' => $v], [36, 37, 38, 38, 39, 40, 40]),
+            'cvr'     => array_map(fn($v) => ['value' => $v], [2.3, 2.4, 2.5, 2.55, 2.58, 2.62, 2.65]),
+        ] : null;
+
+        return Inertia::render('Dashboard', [
+            'trust_bar' => [
+                'revenue' => [
+                    ['source' => 'real',     'value' => 124530.42, 'formatted' => '$124,530', 'available' => true],
+                    ['source' => 'store',    'value' => 118200.10, 'formatted' => '$118,200', 'available' => true],
+                    ['source' => 'facebook', 'value' => 148900.00, 'formatted' => '$148,900', 'available' => true],
+                    ['source' => 'google',   'value' => 89400.55,  'formatted' => '$89,401',  'available' => true],
+                    ['source' => 'gsc',      'value' => null,      'formatted' => 'N/A',      'available' => false],
+                    ['source' => 'ga4',      'value' => 117800.00, 'formatted' => '$117,800', 'available' => true],
+                ],
+                'real_revenue'   => ['value' => 124530.42, 'formatted' => '$124,530'],
+                'not_tracked'    => ['value' => -6369.58,  'formatted' => '-$6,370'],
+                'orders'         => 1249,
+                'confidence'     => 'high',
+            ],
+
+            'kpis' => [
+                [
+                    'name'         => 'Revenue',
+                    'qualifier'    => '7d',
+                    'value'        => '$124,530',
+                    'delta_pct'    => 12.4,
+                    'delta_period' => $comparisonLabel ?? 'vs prior 7d',
+                    'sparkline'    => array_map(fn($v) => ['value' => $v],
+                        [102000, 108500, 115200, 119800, 123100, 124000, 124530]),
+                    'comparison_sparkline' => $cmpSparklines['revenue'] ?? null,
+                    'comparison_value'     => $hasComparison ? 108210.10 : null,
+                    'comparison_label'     => $comparisonLabel,
+                    'sources' => [
+                        ['source' => 'real',     'value' => 124530.42, 'available' => true],
+                        ['source' => 'store',    'value' => 118200.10, 'available' => true],
+                        ['source' => 'facebook', 'value' => 148900.00, 'available' => true],
+                        ['source' => 'google',   'value' => 89400.55,  'available' => true],
+                        ['source' => 'gsc',      'value' => null,      'available' => false],
+                        ['source' => 'ga4',      'value' => 117800.00, 'available' => true],
+                    ],
+                    'confidence'     => 'high',
+                    'disagreement_pct' => 5.4,
+                ],
+                [
+                    'name'         => 'Profit',
+                    'qualifier'    => '7d',
+                    'value'        => '$38,204',
+                    'delta_pct'    => 8.1,
+                    'delta_period' => $comparisonLabel ?? 'vs prior 7d',
+                    'sparkline'    => array_map(fn($v) => ['value' => $v],
+                        [31000, 33200, 35800, 36900, 37200, 38000, 38204]),
+                    'comparison_sparkline' => $cmpSparklines['profit'] ?? null,
+                    'comparison_value'     => $hasComparison ? 33600.00 : null,
+                    'comparison_label'     => $comparisonLabel,
+                    'sources' => [
+                        ['source' => 'real',     'value' => 38204.00, 'available' => true],
+                        ['source' => 'store',    'value' => 36100.00, 'available' => true],
+                        ['source' => 'facebook', 'value' => null,     'available' => false],
+                        ['source' => 'google',   'value' => null,     'available' => false],
+                        ['source' => 'gsc',      'value' => null,     'available' => false],
+                        ['source' => 'ga4',      'value' => null,     'available' => false],
+                    ],
+                    'confidence'     => 'high',
+                    'disagreement_pct' => null,
+                ],
+                [
+                    'name'         => 'Orders',
+                    'qualifier'    => '7d',
+                    'value'        => '1,249',
+                    'delta_pct'    => 6.2,
+                    'delta_period' => $comparisonLabel ?? 'vs prior 7d',
+                    'sparkline'    => array_map(fn($v) => ['value' => $v],
+                        [940, 1020, 1100, 1180, 1220, 1240, 1249]),
+                    'comparison_sparkline' => $cmpSparklines['orders'] ?? null,
+                    'comparison_value'     => $hasComparison ? 1096 : null,
+                    'comparison_label'     => $comparisonLabel,
+                    'sources' => [
+                        ['source' => 'real',     'value' => 1249, 'available' => true],
+                        ['source' => 'store',    'value' => 1249, 'available' => true],
+                        ['source' => 'facebook', 'value' => 1198, 'available' => true],
+                        ['source' => 'google',   'value' => 1221, 'available' => true],
+                        ['source' => 'gsc',      'value' => null, 'available' => false],
+                        ['source' => 'ga4',      'value' => 1239, 'available' => true],
+                    ],
+                    'confidence'     => 'high',
+                    'disagreement_pct' => null,
+                ],
+                [
+                    'name'         => 'AOV',
+                    'qualifier'    => '7d',
+                    'value'        => '$99.70',
+                    'delta_pct'    => 3.1,
+                    'delta_period' => $comparisonLabel ?? 'vs prior 7d',
+                    'sparkline'    => array_map(fn($v) => ['value' => $v],
+                        [92, 94, 96, 97, 98, 99, 100]),
+                    'comparison_sparkline' => $cmpSparklines['aov'] ?? null,
+                    'comparison_value'     => $hasComparison ? 95.00 : null,
+                    'comparison_label'     => $comparisonLabel,
+                    'sources' => [
+                        ['source' => 'real',     'value' => 99.70, 'available' => true],
+                        ['source' => 'store',    'value' => 94.61, 'available' => true],
+                        ['source' => 'facebook', 'value' => null,  'available' => false],
+                        ['source' => 'google',   'value' => null,  'available' => false],
+                        ['source' => 'gsc',      'value' => null,  'available' => false],
+                        ['source' => 'ga4',      'value' => 95.08, 'available' => true],
+                    ],
+                    'confidence'     => 'high',
+                    'disagreement_pct' => 5.4,
+                ],
+                [
+                    'name'         => 'ROAS',
+                    'qualifier'    => '7d, blended',
+                    'value'        => '3.84x',
+                    'delta_pct'    => -4.2,
+                    'delta_period' => $comparisonLabel ?? 'vs prior 7d',
+                    'sparkline'    => array_map(fn($v) => ['value' => $v],
+                        [4.1, 4.0, 3.95, 3.9, 3.88, 3.85, 3.84]),
+                    'comparison_sparkline' => $cmpSparklines['roas'] ?? null,
+                    'comparison_value'     => $hasComparison ? 3.92 : null,
+                    'comparison_label'     => $comparisonLabel,
+                    'sources' => [
+                        ['source' => 'real',     'value' => 3.84, 'available' => true],
+                        ['source' => 'store',    'value' => null, 'available' => false],
+                        ['source' => 'facebook', 'value' => 4.61, 'available' => true],
+                        ['source' => 'google',   'value' => 2.70, 'available' => true],
+                        ['source' => 'gsc',      'value' => null, 'available' => false],
+                        ['source' => 'ga4',      'value' => null, 'available' => false],
+                    ],
+                    'confidence'     => 'high',
+                    'disagreement_pct' => null,
+                    'invert_trend'   => false,
+                ],
+                [
+                    'name'         => 'MER',
+                    'qualifier'    => '7d',
+                    'value'        => '3.84x',
+                    'delta_pct'    => -2.8,
+                    'delta_period' => $comparisonLabel ?? 'vs prior 7d',
+                    'sparkline'    => array_map(fn($v) => ['value' => $v],
+                        [4.2, 4.1, 4.0, 3.96, 3.92, 3.87, 3.84]),
+                    'comparison_sparkline' => $cmpSparklines['mer'] ?? null,
+                    'comparison_value'     => $hasComparison ? 3.97 : null,
+                    'comparison_label'     => $comparisonLabel,
+                    'sources' => [
+                        ['source' => 'real',     'value' => 3.84, 'available' => true],
+                        ['source' => 'store',    'value' => 3.65, 'available' => true],
+                        ['source' => 'facebook', 'value' => null, 'available' => false],
+                        ['source' => 'google',   'value' => null, 'available' => false],
+                        ['source' => 'gsc',      'value' => null, 'available' => false],
+                        ['source' => 'ga4',      'value' => null, 'available' => false],
+                    ],
+                    'confidence'     => 'high',
+                    'disagreement_pct' => null,
+                    'expanded_label' => 'MER — Marketing Efficiency Ratio',
+                ],
+                [
+                    'name'         => 'CAC',
+                    'qualifier'    => '7d, 1st Time',
+                    'value'        => '$42.18',
+                    'delta_pct'    => 3.9,
+                    'delta_period' => $comparisonLabel ?? 'vs prior 7d',
+                    'sparkline'    => array_map(fn($v) => ['value' => $v],
+                        [38, 39, 40, 41, 41, 42, 42]),
+                    'comparison_sparkline' => $cmpSparklines['cac'] ?? null,
+                    'comparison_value'     => $hasComparison ? 40.00 : null,
+                    'comparison_label'     => $comparisonLabel,
+                    'sources' => [
+                        ['source' => 'real',     'value' => 42.18, 'available' => true],
+                        ['source' => 'store',    'value' => null,  'available' => false],
+                        ['source' => 'facebook', 'value' => 51.20, 'available' => true],
+                        ['source' => 'google',   'value' => 38.80, 'available' => true],
+                        ['source' => 'gsc',      'value' => null,  'available' => false],
+                        ['source' => 'ga4',      'value' => null,  'available' => false],
+                    ],
+                    'confidence'     => 'high',
+                    'disagreement_pct' => null,
+                    'invert_trend'   => true,
+                ],
+                [
+                    'name'         => 'CVR',
+                    'qualifier'    => '7d',
+                    'value'        => '2.84%',
+                    'delta_pct'    => 0.9,
+                    'delta_period' => $comparisonLabel ?? 'vs prior 7d',
+                    'sparkline'    => array_map(fn($v) => ['value' => $v],
+                        [2.5, 2.6, 2.7, 2.75, 2.78, 2.82, 2.84]),
+                    'comparison_sparkline' => $cmpSparklines['cvr'] ?? null,
+                    'comparison_value'     => $hasComparison ? 2.65 : null,
+                    'comparison_label'     => $comparisonLabel,
+                    'sources' => [
+                        ['source' => 'real',     'value' => 2.84, 'available' => true],
+                        ['source' => 'store',    'value' => 2.68, 'available' => true],
+                        ['source' => 'facebook', 'value' => null, 'available' => false],
+                        ['source' => 'google',   'value' => null, 'available' => false],
+                        ['source' => 'gsc',      'value' => null, 'available' => false],
+                        ['source' => 'ga4',      'value' => 2.71, 'available' => true],
+                    ],
+                    'confidence'     => 'medium',
+                    'disagreement_pct' => null,
+                ],
+            ],
+
+            'today_so_far' => [
+                'revenue'           => $todayRevenue,
+                'revenue_formatted' => '$' . number_format($todayRevenue),
+                'orders'            => rand(82, 140),
+                'projected_revenue'           => (int) ($todayRevenue * (24 / max($currentHour, 1))),
+                'projected_revenue_formatted' => '$' . number_format((int) ($todayRevenue * (24 / max($currentHour, 1)))),
+                'hourly_data'       => $hourly,
+                'baseline_revenue'  => 21400,
+            ],
+
+            'trend'            => $trend,
+            'comparison_trend' => $comparisonTrend,
+            'comparison_label' => $comparisonLabel,
+
+            'targets' => [
+                [
+                    'label'    => 'Monthly Revenue',
+                    'metric'   => 'revenue',
+                    'current'  => 387200,
+                    'target'   => 500000,
+                    'unit'     => 'USD',
+                    'deadline' => $now->copy()->endOfMonth()->format('Y-m-d'),
+                    'status'   => 'at_risk',
+                ],
+                [
+                    'label'    => 'Blended ROAS',
+                    'metric'   => 'roas',
+                    'current'  => 3.84,
+                    'target'   => 4.00,
+                    'unit'     => 'x',
+                    'deadline' => $now->copy()->endOfMonth()->format('Y-m-d'),
+                    'status'   => 'at_risk',
+                ],
+                [
+                    'label'    => 'New Customers',
+                    'metric'   => 'new_customers',
+                    'current'  => 428,
+                    'target'   => 600,
+                    'unit'     => '',
+                    'deadline' => $now->copy()->endOfMonth()->format('Y-m-d'),
+                    'status'   => 'at_risk',
+                ],
+            ],
+
+            'activity' => [
+                [
+                    'id'         => 1,
+                    'type'       => 'order',
+                    'title'      => 'New order #10482',
+                    'subtitle'   => 'j***@gmail.com · Facebook',
+                    'value'      => '$148.00',
+                    'timestamp'  => $now->copy()->subSeconds(42)->toISOString(),
+                ],
+                [
+                    'id'         => 2,
+                    'type'       => 'order',
+                    'title'      => 'New order #10481',
+                    'subtitle'   => 's***@hotmail.com · Google',
+                    'value'      => '$89.95',
+                    'timestamp'  => $now->copy()->subMinutes(3)->toISOString(),
+                ],
+                [
+                    'id'         => 3,
+                    'type'       => 'order',
+                    'title'      => 'New order #10480',
+                    'subtitle'   => 'm***@outlook.com · Direct',
+                    'value'      => '$224.50',
+                    'timestamp'  => $now->copy()->subMinutes(7)->toISOString(),
+                ],
+                [
+                    'id'         => 4,
+                    'type'       => 'refund',
+                    'title'      => 'Refund processed #10471',
+                    'subtitle'   => 'a***@gmail.com',
+                    'value'      => '-$89.95',
+                    'timestamp'  => $now->copy()->subMinutes(18)->toISOString(),
+                ],
+                [
+                    'id'         => 5,
+                    'type'       => 'order',
+                    'title'      => 'New order #10479',
+                    'subtitle'   => 'k***@yahoo.com · Facebook',
+                    'value'      => '$312.00',
+                    'timestamp'  => $now->copy()->subMinutes(22)->toISOString(),
+                ],
+                [
+                    'id'         => 6,
+                    'type'       => 'sync',
+                    'title'      => 'Facebook Ads synced',
+                    'subtitle'   => 'Ad insights updated — last 3 days refreshed',
+                    'value'      => null,
+                    'timestamp'  => $now->copy()->subMinutes(30)->toISOString(),
+                ],
+                [
+                    'id'         => 7,
+                    'type'       => 'order',
+                    'title'      => 'New order #10478',
+                    'subtitle'   => 'p***@gmail.com · Google',
+                    'value'      => '$67.00',
+                    'timestamp'  => $now->copy()->subMinutes(41)->toISOString(),
+                ],
+                [
+                    'id'         => 8,
+                    'type'       => 'alert',
+                    'title'      => 'CAC up 12% vs 7-day avg',
+                    'subtitle'   => 'Facebook CPA crossed threshold',
+                    'value'      => null,
+                    'timestamp'  => $now->copy()->subMinutes(55)->toISOString(),
+                ],
+                [
+                    'id'         => 9,
+                    'type'       => 'order',
+                    'title'      => 'New order #10477',
+                    'subtitle'   => 'r***@gmail.com · Direct',
+                    'value'      => '$441.00',
+                    'timestamp'  => $now->copy()->subHours(1)->toISOString(),
+                ],
+                [
+                    'id'         => 10,
+                    'type'       => 'order',
+                    'title'      => 'New order #10476',
+                    'subtitle'   => 't***@gmail.com · GA4',
+                    'value'      => '$55.00',
+                    'timestamp'  => $now->copy()->subHours(1)->subMinutes(12)->toISOString(),
+                ],
+            ],
+
+            'alerts' => [
+                [
+                    'id'           => 1,
+                    'type'         => 'anomaly',
+                    'title'        => 'Unattributed orders: $6,370',
+                    'description'  => '$6,370 in sales this period has no tracked source. Connect ads integrations or check UTM coverage.',
+                    'severity'     => 'info',
+                    'created_at'   => $now->copy()->subHours(2)->toISOString(),
+                    'action_href'  => '/attribution',
+                    'action_label' => 'View attribution',
+                ],
+                [
+                    'id'           => 2,
+                    'type'         => 'anomaly',
+                    'title'        => 'CAC rose 12% vs 7-day average',
+                    'description'  => 'Facebook CPA is $51.20 today vs $45.70 average. Check creative fatigue.',
+                    'severity'     => 'warning',
+                    'created_at'   => $now->copy()->subHours(3)->toISOString(),
+                    'action_href'  => '/ads',
+                    'action_label' => 'View campaigns',
+                ],
+                [
+                    'id'           => 3,
+                    'type'         => 'sync_failure',
+                    'title'        => 'GSC not connected',
+                    'description'  => 'Search Console data is unavailable. Connect GSC to see organic traffic attribution.',
+                    'severity'     => 'info',
+                    'created_at'   => $now->copy()->subDays(1)->toISOString(),
+                    'action_href'  => '/integrations',
+                    'action_label' => 'Connect GSC',
+                ],
+            ],
+        ]);
+    }
+
+    /**
+     * Stub kept so the legacy route registered in web.php doesn't 500.
+     * Wave 1 stub — the new Dashboard no longer uses the inflation banner.
+     */
+    public function dismissNotTrackedBanner(): \Illuminate\Http\JsonResponse
+    {
+        return response()->json(['ok' => true]);
     }
 }

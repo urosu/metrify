@@ -116,10 +116,9 @@ class OrderSeeder extends Seeder
                     $email         = self::EMAILS[array_rand(self::EMAILS)];
                     $paymentKey    = array_rand(self::PAYMENT_METHODS);
                     $paymentTitle  = self::PAYMENT_METHODS[$paymentKey];
-                    // customer_id: numeric string, per-store. ~30% of orders are repeat customers.
-                    $customerId    = mt_rand(0, 100) < 30
-                        ? (string) mt_rand(1001, 1050)  // repeat pool
-                        : (string) ($externalId + mt_rand(2000, 9999));
+                    // customer_id is a FK to the customers table (nullable).
+                    // The seeder doesn't populate customers, so we leave it null.
+                    // Repeat-customer detection in analytics uses customer_email_hash instead.
 
                     $items    = $this->pickItems(rand(1, 2));
                     $subtotal = array_sum(array_column($items, 'line_total'));
@@ -155,7 +154,7 @@ class OrderSeeder extends Seeder
                         'refund_amount'               => $status === 'refunded' ? $total : 0.00,
                         'total_in_reporting_currency' => $totalEur,
                         'customer_email_hash'         => hash('sha256', strtolower(trim($email))),
-                        'customer_id'                 => $customerId,
+                        'customer_id'                 => null,
                         'customer_country'            => $country,
                         'shipping_country'            => $country,
                         'payment_method'              => $paymentKey,

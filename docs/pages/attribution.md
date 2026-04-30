@@ -4,7 +4,7 @@ Route: `/attribution`
 
 ## Purpose
 
-The page where source disagreement is the product — show, per channel, how much revenue Store recorded vs what each platform claims, compute a Real number, and make "Not Tracked" a first-class, drillable bucket that can go negative.
+The source comparison page — show, per channel, how much revenue Store recorded vs what each platform claims, compute a Real (reconciled) number, and make the attribution gap drillable. This is the one page where source comparison is the explicit purpose; TrustBar and the Source Comparison Matrix are the primary surfaces here.
 
 ## User questions this page answers
 
@@ -23,8 +23,8 @@ The page where source disagreement is the product — show, per channel, how muc
 | Facebook (indigo-500) | Yes | Platform-reported conversions from `ad_insights` joined to orders via `fbclid` / Meta click ID + windowed attribution | ~15 min |
 | Google Ads (amber-500) | Yes | Platform-reported conversions via `gclid` / GCLID enhanced conversions + windowed attribution | ~30 min |
 | GSC (emerald-500) | Optional | `gsc_daily` clicks as an organic-attribution signal; never a conversion source in v1 | 24–48h (Google delay) |
-| Site (violet-500) | Optional | First-party session pixel (future) | v2 |
-| Real (yellow-400) | Yes — computed | `RevenueAttributionService` reconciling the above via workspace model + window | Derivative of inputs |
+| GA4 (violet-500) | Optional | GA4 event data via GA4 connector — `orders.utm_*` + GA4 session joins | Near real-time |
+| Real (zinc-500) | Yes — computed | `RevenueAttributionService` reconciling the above via workspace model + window | Derivative of inputs |
 
 "Not Tracked" is derived: `Total Revenue − Σ(Attributed Revenue across sources after de-duplication)` — can go negative (see `_crosscut_metric_dictionary.md` Trust group).
 
@@ -34,13 +34,13 @@ The page where source disagreement is the product — show, per channel, how muc
 - **Toolbar row** (right-aligned above the matrix): `ShareSnapshotButton` (§5.29) · `ExportMenu` (§5.30 — CSV includes source-disagreement matrix as long-form rows)
 - AlertBanner (warning) — inline when attribution gap crosses ±15% or Modeled signals are calibrating (copy: "Facebook over-reports by 18% this period — inspect")
 - KpiGrid (4 cols) — each `MetricCardDetail` variant (§5.1 — includes prev-period + prev-year deltas + source-disagreement gap chip)
-  - MetricCard "Real Revenue (28d)" · sources=[Real, Store, Facebook, Google] · gold-lightbulb on Real
+  - MetricCard "Real Revenue (28d)" · auto-source=Real · compare-sources popover shows Store, Facebook, Google side-by-side
   - MetricCard "Attributed Revenue" · sources=[Facebook, Google] — summed cross-platform, header carries `Σ per source · may exceed Total` microcopy per §5.1
   - MetricCard "Not Tracked" · sources=[computed] · signed value; negative styling in rose, positive in slate. Click body → Not Tracked drill (see below)
   - MetricCard "Attribution Gap" · sources=[computed] · headline is signed currency `Σ(Attributed Revenue across sources after de-dup) − Total Revenue` per `_crosscut_metric_dictionary.md` glossary (absolute difference, not ratio). Delta tracks movement vs previous period; positive = over-claimed, negative = under-claimed. Tooltip derivation cites the formula verbatim.
-- **Source Disagreement Matrix** (signature viz, page-local, novel — extends the Rockerbox / Fairing side-by-side pattern to N sources):
+- **Source Comparison Matrix** (page-local, novel — extends the Rockerbox / Fairing side-by-side pattern to N sources):
   - Rows = channels (`Facebook Ads · Google Ads · Email · SMS · Organic · Direct · Referral · Not Tracked`). Rows come from `ChannelMappings` seeder + a pinned `Not Tracked` synthetic row at the bottom.
-  - Columns = sources (`Store · Facebook · Google · GSC · Real`). Site hidden in v1.
+  - Columns = sources (`Store · Facebook · Google · GSC · GA4 · Real`).
   - Cells show attributed revenue for that channel × source cell, plus a small delta chip `Δ vs Store` (green / rose / neutral per sign).
   - Cell coloring: red-to-green gradient on `|Δ|` magnitude (Peel cohort-heatmap pattern).
   - Click any cell → DataTable drill filtered to orders in that channel × source intersection.
@@ -83,12 +83,12 @@ Small per-source row, patterned on Elevar's Channel Accuracy Report: per connect
 
 ## Interactions specific to this page
 
-- **Global AttributionModelSelector + WindowSelector are authoritative** (§7.0.1). Changing the model retroactively recomputes the matrix, model comparison table, line chart, and every MetricCard (Klaviyo-style recalc with brief `Recomputing…` banner). URL state is `?model=last-non-direct&window=7d`.
-- **AccountingModeSelector** flips revenue attribution between click-date (Accrual Performance) and order-date (Cash Snapshot). On Attribution specifically, Cash Snapshot is the default because it matches Shopify admin — which is the disagreement users are investigating.
-- **SourceToggle** (multi-select of the 6 sources in TopBar) propagates to the matrix column visibility. Defaults `[Real]` but the matrix forces a minimum of Store + Real columns visible (collapsing to one source defeats the page's purpose — Store stays as baseline).
+- **AttributionModelSelector + WindowSelector live in-page** (§7.0.1), placed above the Source Comparison Matrix. Changing the model retroactively recomputes the matrix, model comparison table, line chart, and every MetricCard (Klaviyo-style recalc with brief `Recomputing…` banner). URL state is `?model=last-non-direct&window=7d`.
+- **AccountingModeSelector** flips revenue attribution between click-date (Accrual Performance) and order-date (Cash Snapshot). On Attribution specifically, Cash Snapshot is the default because it matches Shopify admin — which is what users are investigating.
+- **SourceToggle** (multi-select of the 6 sources, placed above the matrix) propagates to the matrix column visibility. Defaults to all sources visible; the matrix forces a minimum of Store + Real columns visible (collapsing to one source defeats the page's purpose — Store stays as baseline).
 - **Click a cell in the Source Disagreement Matrix** → DataTable drill filtered to that channel × source. Click a column header → swap the highlighted source across the page.
 - **Right-click any matrix cell** → ContextMenu: `Filter to this · Exclude this · Copy value · Open in Orders · Add annotation here` (the add-annotation option only lights up on the LineChart).
-- **Attribution Time Machine scrub** also updates the KpiGrid + TrustBar to that date's state — so the entire page becomes a replay surface. Release the scrub → everything snaps back to live data.
+- **Attribution Time Machine scrub** also updates the KpiGrid + TrustBar + Source Comparison Matrix to that date's state — so the entire page becomes a replay surface. Release the scrub → everything snaps back to live data.
 - **Model Comparison Table "Pin a model"** writes to `?model=` and triggers the global recalc once — so the choice flows into every other page in the session.
 - **ConfidenceChip (§5.27) is aggressive here** — any cell below threshold greys out the number and suppresses the Δ. Trust depends on not letting small samples drive conclusions.
 - **SignalTypeBadge (§5.28) on every Facebook cell** computed from Clicks+Modeled Views. Click the badge for the methodology + sample size; hover for one-line summary.
@@ -110,7 +110,7 @@ Small per-source row, patterned on Elevar's Channel Accuracy Report: per connect
 
 ## Mobile tier
 
-**Desktop-only** (≥1280px). The Source Disagreement Matrix, Model Comparison Table, and Attribution Time Machine scrubber do not survive on mobile. At `<lg` the page renders a banner ("Attribution requires desktop — matrix comparisons don't fit small screens. Mobile users get the TrustBar + Not Tracked drilldown only.") with the TrustBar + a simplified orders list. Customer Journey Timeline is the only below-the-fold section that stays usable on tablet.
+**Desktop-only** (≥1280px). The Source Comparison Matrix, Model Comparison Table, and Attribution Time Machine scrubber do not survive on mobile. At `<lg` the page renders a banner ("Attribution requires desktop — matrix comparisons don't fit small screens. Mobile users get the TrustBar + Not Tracked drilldown only.") with the TrustBar + a simplified orders list. Customer Journey Timeline is the only below-the-fold section that stays usable on tablet.
 
 ## Out of scope v1
 

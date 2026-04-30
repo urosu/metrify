@@ -99,24 +99,30 @@ class ComputeDailySnapshotJobTest extends TestCase
 
     public function test_aov_is_null_when_zero_orders(): void
     {
-        // No orders inserted
+        // No orders inserted — aov is computed at query-time as revenue / NULLIF(orders_count, 0).
+        // With 0 orders, orders_count = 0 so the SQL expression yields NULL.
 
         $this->runJob();
 
         $snapshot = DailySnapshot::withoutGlobalScopes()->where('store_id', $this->store->id)->first();
         $this->assertSame(0, $snapshot->orders_count);
-        $this->assertNull($snapshot->aov);
+        // aov is not a stored column — assert the raw components that drive the computation.
+        $this->assertSame(0, $snapshot->orders_count);  // NULLIF(0,0) → NULL, so aov → NULL
+        $this->assertSame(0.0, (float) $snapshot->revenue);
     }
 
     public function test_aov_calculated_correctly(): void
     {
+        // aov is computed at query-time as revenue / NULLIF(orders_count, 0) — not stored.
         $this->insertOrder(['total_in_reporting_currency' => 150.00]);
         $this->insertOrder(['total_in_reporting_currency' => 250.00]);
 
         $this->runJob();
 
         $snapshot = DailySnapshot::withoutGlobalScopes()->where('store_id', $this->store->id)->first();
-        $this->assertEqualsWithDelta(200.00, (float) $snapshot->aov, 0.01);
+        // Verify the stored components; callers compute aov = revenue / orders_count.
+        $this->assertSame(2, $snapshot->orders_count);
+        $this->assertEqualsWithDelta(400.00, (float) $snapshot->revenue, 0.01);
     }
 
     public function test_new_vs_returning_customers_counted(): void

@@ -20,8 +20,8 @@ The order-by-order ground truth — what came in, who bought, which platform cla
 | Facebook | no | `orders.attribution_*` columns set by `RevenueAttributionService` from click IDs + `ad_insights` | computed at order ingest |
 | Google Ads | no | same as Facebook (GCLID + `ad_insights`) | computed at order ingest |
 | GSC | no | indirectly, via Organic Search channel mapping on `orders.utm_*` | computed at order ingest |
-| Site | no | `orders.utm_*` columns + session data (non-platform first-party signals) | computed at order ingest |
-| Real | yes | `RevenueAttributionService`-computed attribution winner per order; gold lightbulb | derived on request |
+| GA4 | no | `orders.utm_*` columns + GA4 session joins | computed at order ingest |
+| Real | yes | `RevenueAttributionService`-computed attribution winner per order | derived on request |
 
 COGS shown per row is read-only on this page (sourced from product variant meta). Inline edits live on `/products` per [CLAUDE.md Gotchas](../../CLAUDE.md) and [UX §5.5.1](../UX.md#551-inline-editable-cell-datatable-sub-primitive).
 

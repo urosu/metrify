@@ -232,7 +232,8 @@ class UpsertWooCommerceOrderActionTest extends TestCase
         ]));
 
         $order = Order::withoutGlobalScopes()->where('store_id', $this->store->id)->first();
-        $this->assertSame('42', $order->customer_id);
+        // customer_id is a bigInteger column — Eloquent returns it as int, not string.
+        $this->assertSame(42, $order->customer_id);
     }
 
     public function test_payment_method_stored(): void

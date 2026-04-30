@@ -92,9 +92,8 @@ class GenerateMonthlyReportJobTest extends TestCase
             'revenue'             => 1000.00,
             'revenue_native'      => 1000.00,
             'orders_count'        => 5,
-            'aov'                 => 200.00,
+            // aov and items_per_order are computed at query-time — not stored columns.
             'items_sold'          => 8,
-            'items_per_order'     => 1.60,
             'new_customers'       => 3,
             'returning_customers' => 2,
             'created_at'          => now(),
@@ -107,9 +106,8 @@ class GenerateMonthlyReportJobTest extends TestCase
             'revenue'             => 500.00,
             'revenue_native'      => 500.00,
             'orders_count'        => 2,
-            'aov'                 => 250.00,
+            // aov and items_per_order are computed at query-time — not stored columns.
             'items_sold'          => 3,
-            'items_per_order'     => 1.50,
             'new_customers'       => 1,
             'returning_customers' => 1,
             'created_at'          => now(),

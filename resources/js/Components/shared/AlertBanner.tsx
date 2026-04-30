@@ -1,14 +1,37 @@
-import { useState } from 'react';
+import { useState, useEffect, type ReactNode } from 'react';
 import { X, AlertTriangle, Info, AlertCircle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 type Severity = 'info' | 'warning' | 'critical';
 
+/**
+ * Optional dismiss persistence. When provided, the banner stays dismissed across
+ * page loads by writing a flag under the given key in the chosen storage.
+ */
+interface PersistenceConfig {
+    key: string;
+    /** 'session' = sessionStorage (default), 'local' = localStorage. */
+    storage?: 'session' | 'local';
+}
+
 interface AlertBannerProps {
-    message: string;
+    message: ReactNode;
     severity?: Severity;
     action?: { label: string; href: string };
     onDismiss?: () => void;
+    persistence?: PersistenceConfig;
+}
+
+function readPersistedDismissed(p: PersistenceConfig | undefined): boolean {
+    if (!p || typeof window === 'undefined') return false;
+    const store = p.storage === 'local' ? window.localStorage : window.sessionStorage;
+    try { return store.getItem(p.key) === '1'; } catch { return false; }
+}
+
+function writePersistedDismissed(p: PersistenceConfig | undefined): void {
+    if (!p || typeof window === 'undefined') return;
+    const store = p.storage === 'local' ? window.localStorage : window.sessionStorage;
+    try { store.setItem(p.key, '1'); } catch { /* quota / private mode — ignore */ }
 }
 
 const severityConfig: Record<Severity, {
@@ -46,8 +69,13 @@ export function AlertBanner({
     severity = 'info',
     action,
     onDismiss,
+    persistence,
 }: AlertBannerProps) {
     const [dismissed, setDismissed] = useState(false);
+
+    useEffect(() => {
+        if (readPersistedDismissed(persistence)) setDismissed(true);
+    }, [persistence?.key, persistence?.storage]);
 
     if (dismissed) return null;
 
@@ -56,6 +84,7 @@ export function AlertBanner({
 
     const handleDismiss = () => {
         setDismissed(true);
+        writePersistedDismissed(persistence);
         onDismiss?.();
     };
 

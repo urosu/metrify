@@ -39,7 +39,9 @@ interface BarChartProps {
     /** Callback when a bar is clicked (e.g. drill into hourly) */
     onBarClick?: (dataPoint: BarChartDataPoint) => void;
     /** Annotate specific dates with a subtle reference line + amber marker */
-    notes?: Array<{ date: string; note: string }>;
+    notes?: Array<{ date: string; note?: string; label?: string; type?: string }>;
+    /** Custom X-axis tick formatter; falls back to formatDate(granularity) when omitted. */
+    xAxisFormatter?: (value: string | number) => string;
     loading?: boolean;
     className?: string;
 }
@@ -93,6 +95,7 @@ const BarChartWrapper = React.memo(function BarChartWrapper({
     series,
     onBarClick,
     notes,
+    xAxisFormatter,
     loading = false,
     className,
 }: BarChartProps) {
@@ -149,7 +152,7 @@ const BarChartWrapper = React.memo(function BarChartWrapper({
                         tickLine={false}
                         axisLine={false}
                         tick={{ fontSize: 11, fill: '#a1a1aa' }}
-                        tickFormatter={(d) => formatDate(d, granularity, timezone)}
+                        tickFormatter={(d) => (xAxisFormatter ? xAxisFormatter(d) : formatDate(d, granularity, timezone))}
                         minTickGap={40}
                     />
                     <YAxis
@@ -221,16 +224,19 @@ const BarChartWrapper = React.memo(function BarChartWrapper({
                             </>
                           )
                     }
-                    {notes?.map(({ date, note }) => (
+                    {notes?.map((annotation) => {
+                        const text = annotation.note ?? annotation.label ?? '';
+                        return (
                         <ReferenceLine
-                            key={date}
-                            x={date}
+                            key={annotation.date}
+                            x={annotation.date}
                             stroke="#d4d4d8"
                             strokeDasharray="3 3"
                             strokeWidth={1}
-                            label={(props: object) => <NoteMarker {...(props as NoteMarkerProps)} note={note} />}
+                            label={(props: object) => <NoteMarker {...(props as NoteMarkerProps)} note={text} />}
                         />
-                    ))}
+                        );
+                    })}
             </RechartsBarChart>}
         </div>
     );

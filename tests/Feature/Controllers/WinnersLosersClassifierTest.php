@@ -9,12 +9,11 @@ use App\Models\AdInsight;
 use App\Models\Campaign;
 use App\Models\Order;
 use App\Models\Store;
-use App\Models\User;
 use App\Models\Workspace;
-use App\Models\WorkspaceUser;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use Tests\Concerns\WithOnboardedWorkspace;
 use Tests\TestCase;
 
 /**
@@ -37,31 +36,15 @@ use Tests\TestCase;
 class WinnersLosersClassifierTest extends TestCase
 {
     use RefreshDatabase;
+    use WithOnboardedWorkspace;
 
-    private User $user;
-    private Workspace $workspace;
-    private Store $store;
     private AdAccount $adAccount;
 
     protected function setUp(): void
     {
         parent::setUp();
+        $this->setUpOnboardedWorkspace();
 
-        $this->user = User::factory()->create();
-        $this->workspace = Workspace::factory()->create(['owner_id' => $this->user->id]);
-
-        WorkspaceUser::factory()->owner()->create([
-            'user_id'      => $this->user->id,
-            'workspace_id' => $this->workspace->id,
-        ]);
-
-        // Store with completed import satisfies EnsureOnboardingComplete (path 1).
-        $this->store = Store::factory()->create([
-            'workspace_id'             => $this->workspace->id,
-            'historical_import_status' => 'completed',
-        ]);
-
-        // Shared ad account used for stores/spend tests; campaigns tests create their own.
         $this->adAccount = AdAccount::factory()->create([
             'workspace_id' => $this->workspace->id,
             'platform'     => 'facebook',
@@ -148,9 +131,8 @@ class WinnersLosersClassifierTest extends TestCase
             'revenue'             => $revenue,
             'revenue_native'      => $revenue,
             'orders_count'        => 10,
-            'aov'                 => $revenue / 10,
+            // aov and items_per_order are computed at query-time — not stored columns.
             'items_sold'          => 10,
-            'items_per_order'     => 1.0,
             'new_customers'       => 5,
             'returning_customers' => 5,
             'created_at'          => now(),

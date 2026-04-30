@@ -70,9 +70,8 @@ class SnapshotSeeder extends Seeder
                     'orders_count'        => $count,
                     'revenue'             => round($revenue, 4),
                     'revenue_native'      => round($revenueNative, 4),
-                    'aov'                 => $count > 0 ? round($revenue / $count, 4) : null,
+                    // aov and items_per_order are computed at query-time — never stored.
                     'items_sold'          => (int) $totalItems,
-                    'items_per_order'     => $count > 0 ? round($totalItems / $count, 2) : null,
                     'new_customers'       => $newCustomers,
                     'returning_customers' => $returningCustomers,
                 ]
