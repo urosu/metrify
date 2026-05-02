@@ -26,6 +26,7 @@ RUN install-php-extensions \
     opcache \
     pcntl \
     exif \
+    gd \
     redis
 
 # Composer

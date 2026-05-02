@@ -27,8 +27,7 @@ class AuthenticationTest extends TestCase
         ]);
 
         $this->assertAuthenticated();
-        // Login redirects to onboarding which forwards to the dashboard once onboarding is complete.
-        $response->assertRedirect(route('onboarding', absolute: false));
+        $response->assertRedirect(route('dashboard', absolute: false));
     }
 
     public function test_users_can_not_authenticate_with_invalid_password(): void

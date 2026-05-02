@@ -35,44 +35,4 @@ return [
         ],
     ],
 
-    'facebook' => [
-        'client_id'     => env('FACEBOOK_APP_ID'),
-        'client_secret' => env('FACEBOOK_APP_SECRET'),
-        'redirect'      => env('FACEBOOK_REDIRECT_URI'),
-        // 'dev' = Marketing API development tier (max score 60, blocks for 300s when reached).
-        // 'standard' = after App Review grants Advanced Access to Ads Management Standard Access.
-        // Set FB_API_TIER=standard in .env once approved — unlocks ~190k+ calls/hour.
-        'api_tier'      => env('FB_API_TIER', 'dev'),
-    ],
-
-    'frankfurter' => [
-        'url' => env('FRANKFURTER_API_URL', 'https://api.frankfurter.dev/v2'),
-    ],
-
-    'google' => [
-        'client_id'           => env('GOOGLE_CLIENT_ID'),
-        'client_secret'       => env('GOOGLE_CLIENT_SECRET'),
-        'redirect'            => env('GOOGLE_REDIRECT_URI'),
-        'ads_developer_token' => env('GOOGLE_ADS_DEVELOPER_TOKEN'),
-    ],
-
-    // GA4 — uses the same Google Cloud project as the google block above.
-    // Separate redirect URI so the OAuth consent screen shows a distinct callback
-    // (required when registering the GA4 redirect in Google Cloud Console).
-    // If you reuse the same redirect URI as google.redirect, update GOOGLE_REDIRECT_URI
-    // to handle both `state.type=google_ads|gsc` and `state.type=ga4`.
-    // @see docs/competitors/_research_ga4_oauth_integration.md §Env vars
-    'ga4' => [
-        'redirect' => env('GA4_REDIRECT_URI', env('GOOGLE_REDIRECT_URI')),
-    ],
-
-    // PageSpeed Insights API — used by RunLighthouseCheckJob.
-    // Key is a Google Cloud API key with PageSpeed Insights API enabled.
-    // Without a key, PSI allows ~25 req/day per IP (too low for production).
-    // See: PLANNING.md "Performance Monitoring — PSI Rate Limit Planning"
-    'psi' => [
-        'api_key' => env('PSI_API_KEY'),
-        'timeout' => (int) env('PSI_TIMEOUT_SECONDS', 60),
-    ],
-
 ];

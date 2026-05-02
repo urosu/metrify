@@ -1,7 +1,5 @@
 <?php
 
-declare(strict_types=1);
-
 namespace App\Http\Controllers;
 
 use App\Http\Requests\ProfileUpdateRequest;
@@ -16,23 +14,11 @@ use Inertia\Response;
 class ProfileController extends Controller
 {
     /**
-     * Display the user's profile form (Breeze default, AuthenticatedLayout).
+     * Display the user's profile form.
      */
     public function edit(Request $request): Response
     {
         return Inertia::render('Profile/Edit', [
-            'mustVerifyEmail' => $request->user() instanceof MustVerifyEmail,
-            'status' => session('status'),
-        ]);
-    }
-
-    /**
-     * Display the profile settings page within the app shell (AppLayout).
-     * Mounted at /settings/profile in the settings route group.
-     */
-    public function settingsPage(Request $request): Response
-    {
-        return Inertia::render('Settings/Profile', [
             'mustVerifyEmail' => $request->user() instanceof MustVerifyEmail,
             'status' => session('status'),
         ]);
@@ -51,31 +37,7 @@ class ProfileController extends Controller
 
         $request->user()->save();
 
-        return back()->with('status', 'profile-updated');
-    }
-
-    /**
-     * Merge arbitrary key/value pairs into the user's view_preferences JSONB.
-     *
-     * Why: BreakdownView and other UI components persist per-view state (breakdown mode,
-     * sort order, filter chip) across sessions. Each call merges — never replaces —
-     * so callers can update one key without knowing the full object.
-     *
-     * Related: resources/js/Components/shared/BreakdownView.tsx (reads + writes these prefs)
-     * See: PLANNING.md "view_preferences JSONB" — users.view_preferences
-     */
-    public function updateViewPreferences(Request $request): \Illuminate\Http\JsonResponse
-    {
-        $data = $request->validate([
-            'preferences' => ['required', 'array'],
-            'preferences.*' => ['present'],
-        ]);
-
-        $user = $request->user();
-        $prefs = $user->view_preferences ?? [];
-        $user->update(['view_preferences' => array_merge($prefs, $data['preferences'])]);
-
-        return response()->json(['ok' => true]);
+        return Redirect::route('profile.edit');
     }
 
     /**

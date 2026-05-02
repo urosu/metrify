@@ -6,7 +6,7 @@ services:
       dockerfile: ./Dockerfile
       args:
         PHP_VERSION: 8.5
-    restart: unless-stopped
+    restart: "no"
     user: "${UID}:${GID}"
     environment:
       APACHE_RUN_USER: '#${UID}'
@@ -35,7 +35,7 @@ services:
       dockerfile: ./Dockerfile
       args:
         PHP_VERSION: 8.5
-    restart: unless-stopped
+    restart: "no"
     user: "${UID}:${GID}"
     command: php artisan schedule:work
     volumes:
@@ -54,7 +54,7 @@ services:
       dockerfile: ./Dockerfile
       args:
         PHP_VERSION: 8.5
-    restart: unless-stopped
+    restart: "no"
     user: "${UID}:${GID}"
     command: php artisan horizon
     volumes:
@@ -69,21 +69,21 @@ services:
   postgres:
     container_name: nexstage-postgres
     image: postgres:18
-    restart: unless-stopped
+    restart: "no"
     environment:
       POSTGRES_DB: nexstage
       POSTGRES_USER: nexstage
       POSTGRES_PASSWORD: secret
     volumes:
       - postgres_data:/var/lib/postgresql
-      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
     networks:
       - nexstage
 
   redis:
     container_name: nexstage-redis
     image: redis:8-alpine
-    restart: unless-stopped
+    restart: "no"
     command: redis-server --appendonly yes --appendfsync everysec
     volumes:
       - redis_data:/data
@@ -93,7 +93,7 @@ services:
   mailpit:
     container_name: nexstage-mailpit
     image: axllent/mailpit:latest
-    restart: unless-stopped
+    restart: "no"
     environment:
       MP_UI_BIND_ADDR: 0.0.0.0:8025
     networks:
@@ -110,7 +110,7 @@ services:
   pgadmin:
     container_name: nexstage-pgadmin
     image: dpage/pgadmin4:latest
-    restart: unless-stopped
+    restart: "no"
     environment:
       PGADMIN_DEFAULT_EMAIL: admin@nexstage.dev
       PGADMIN_DEFAULT_PASSWORD: admin
